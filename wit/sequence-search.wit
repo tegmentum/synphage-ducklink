@@ -1,0 +1,135 @@
+package tegmentum:bio@0.1.0;
+
+/// Local pairwise sequence alignment as a DuckLink-consumable capability.
+/// Nucleotide (BLASTN-shape) and protein (BLASTP-shape) share one interface —
+/// the alignment mode is a scoring variant, not a separate function — so the
+/// component that satisfies this world can grow both without a WIT split.
+///
+/// Design principles
+/// - Relational I/O: sequences and hits are lists of typed records, so a
+///   DuckLink table function can pass DuckDB columnar batches straight
+///   through without a JSON serialisation hop.
+/// - Presets over parameters: NCBI's blastn/blastp defaults are selectable
+///   via unit variants; callers who want to override individual knobs (word
+///   size, gap penalties, matrix) supply the data-carrying variant.
+/// - Rank in SQL, not here: this interface returns every alignment surviving
+///   the caller's evalue / identity thresholds. Best-hit selection
+///   (row_number over query_key / subject_genome) belongs in the consumer's
+///   SQL, not in the component.
+interface sequence-search {
+    /// A named sequence. `key` is opaque to the search engine and echoed
+    /// back on every hit, letting the caller join results against their own
+    /// feature tables (locus_tag, gene id, whatever they use). `data` is
+    /// ASCII: ACGT[N] for nucleotide scoring, single-letter amino acids for
+    /// protein scoring. Invalid characters are the caller's responsibility.
+    record sequence {
+        key: string,
+        data: string,
+    }
+
+    /// Watson (+) or Crick (-) strand the subject was aligned on. Always
+    /// `plus` for protein alignment; may be `plus` or `minus` for nucleotide
+    /// (both strands searched by default).
+    enum strand {
+        plus,
+        minus,
+    }
+
+    /// BLASTN scoring tunables. Values are score contributions, not costs:
+    /// `match-reward` is added on a match (typically positive), the other
+    /// three are added on their respective events (typically negative).
+    /// K and lambda are looked up per (reward, penalty, gap-open, gap-extend)
+    /// combination; only combinations tabulated in the NCBI parameter tables
+    /// are accepted — others return `invalid-scoring`.
+    record blastn-scoring {
+        match-reward: s32,
+        mismatch-penalty: s32,
+        gap-open: s32,
+        gap-extend: s32,
+        search-both-strands: bool,
+    }
+
+    /// BLASTP scoring tunables. `matrix` is a name from the NCBI parameter
+    /// tables (currently only "BLOSUM62" is implemented; more can be added
+    /// without a WIT change). K and lambda come from the (matrix, gap-open,
+    /// gap-extend) combination's tabulated constants — combinations without
+    /// tabulated statistics return `invalid-scoring`. Gap values are score
+    /// contributions (typically negative), matching `blastn-scoring`.
+    record blastp-scoring {
+        matrix: string,
+        gap-open: s32,
+        gap-extend: s32,
+    }
+
+    /// Selectable scoring model. The unit variants carry NCBI defaults;
+    /// the data-carrying variants let callers override individual
+    /// parameters without forking the WIT.
+    variant scoring {
+        /// BLASTN default: match +2, mismatch -3, gap open -5, gap extend
+        /// -2. K = 0.634, lambda = 0.408. Both strands searched.
+        blastn-default,
+        blastn(blastn-scoring),
+        /// BLASTP default: BLOSUM62, gap open -11, gap extend -1.
+        /// K = 0.041, lambda = 0.267.
+        blastp-default,
+        blastp(blastp-scoring),
+    }
+
+    /// Filters applied at the component boundary. Callers may set none,
+    /// one, or all; the SQL layer can filter further.
+    record search-options {
+        /// Drop alignments whose E-value exceeds this ceiling.
+        evalue-max: option<f64>,
+        /// Keep at most this many best-scoring subjects per query. Ranking
+        /// is by bit-score descending, then E-value ascending; ties are
+        /// broken lexicographically on subject-key so results are
+        /// deterministic across runs.
+        max-target-seqs: option<u32>,
+        /// Drop alignments whose percent identity is below this floor
+        /// (0.0 – 100.0).
+        min-identity: option<f64>,
+    }
+
+    /// One pairwise local alignment. Positions are 1-indexed and inclusive
+    /// at both ends, matching NCBI BLAST output. `strand` indicates whether
+    /// the subject was aligned as given (plus) or as its reverse complement
+    /// (minus); query coordinates are always on the given orientation.
+    record hit {
+        query-key: string,
+        subject-key: string,
+        query-start: u32,
+        query-end: u32,
+        subject-start: u32,
+        subject-end: u32,
+        strand: strand,
+        identity-count: u32,
+        alignment-length: u32,
+        percent-identity: f64,
+        bit-score: f64,
+        raw-score: f64,
+        evalue: f64,
+    }
+
+    /// Failure modes distinct enough for a SQL error handler to branch on.
+    /// `alignment-failed` carries the aligner's own error text for the rare
+    /// cases it surfaces one.
+    variant search-error {
+        empty-queries,
+        empty-subjects,
+        invalid-sequence(string),
+        invalid-scoring(string),
+        alignment-failed(string),
+    }
+
+    /// Run every query against every subject and return the hits surviving
+    /// `options`. Cost is O(|queries| * |subjects| * avg alignment length).
+    /// For all-vs-all self-comparison, pass the same list twice; self-hits
+    /// (query-key == subject-key) are emitted like any other and filtered
+    /// downstream if unwanted.
+    search: func(
+        queries: list<sequence>,
+        subjects: list<sequence>,
+        scoring: scoring,
+        options: search-options,
+    ) -> result<list<hit>, search-error>;
+}

@@ -1,0 +1,25 @@
+genome_id	feature_key	feature_type	start_position	end_position	strand	gene	product
+NC_001416	lambdap86	CDS	33299	33463	-1	cIII	CIII anti-termination
+NC_001416	lambdap35	CDS	29118	29285	-1		hypothetical protein
+NC_001416	lambdap67	CDS	42269	42439	1	NinF	protein ninF
+NC_001416	lambdap65	CDS	41950	42123	1	NinD	NinD protein
+NC_001416	lambdap39	CDS	31169	31351	-1	orf60a	DUF1317 domain-containing protein
+NC_001416	lambdap66	CDS	42090	42272	1	NinE	NinE family protein
+NC_001416	lambdap91	CDS	46186	46368	1	Rz1	Rz-like spanin
+NC_001416	lambdap37	CDS	30839	31024	-1	orf61	hypothetical protein
+NC_001604	T7p60	CDS	39389	39538	1		hypothetical protein
+NC_001604	T7p02	CDS	1278	1433	1		hypothetical protein
+NC_001604	T7p11	CDS	7608	7763	1		hypothetical protein
+NC_001604	T7p34	CDS	17359	17517	1		Gp5.9-like inihibitor of recBCD nuclease
+NC_001604	T7p06	CDS	1636	1797	1		hypothetical protein
+NC_001604	T7p59	CDS	38553	38726	1		hypothetical protein
+NC_001604	T7p16	CDS	8898	9092	1		RNA polymerase inhibitor
+NC_001604	T7p53	CDS	36344	36547	1		holin
+NC_002371	P22gp39	CDS	28170	28328	-1	c3	CIII anti-termination
+NC_002371	P22gp18	CDS	14861	15022	1	arc	Arc-like repressor
+NC_002371	P22gp33	CDS	26449	26619	-1	orf56	hypothetical protein
+NC_002371	P22gp55	CDS	35184	35357	1	ninD	NinD
+NC_002371	P22gp56	CDS	35324	35500	1	ninE	NinE
+NC_002371	P22gp58	CDS	35828	36004	1	ninF	NinF
+NC_002371	P22gp16	CDS	14240	14419	-1	orf59a	hypothetical protein
+NC_002371	P22gp26	CDS	23482	23661	-1	eaG	EaG

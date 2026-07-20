@@ -1,0 +1,64 @@
+package tegmentum:bio@0.1.0;
+
+/// GenBank ingestion as a relational source. A DuckLink table function
+/// wraps this so `SELECT * FROM genbank_scan('*.gb')` yields the same four
+/// relations Biopython currently produces via Python glue in Synphage.
+///
+/// STATUS: Draft. Record shapes below are the target for the initial
+/// vertical slice; qualifier flattening and multi-record files may need
+/// iteration once we have real inputs wired up.
+interface genome-format {
+    /// One top-level LOCUS record from a GenBank file.
+    record genbank-record {
+        record-id: string,
+        accession: string,
+        version: string,
+        organism: string,
+        length: u32,
+    }
+
+    /// One FEATURE table entry. `feature-index` is stable within the
+    /// enclosing record so features can be re-joined to their qualifiers.
+    record genbank-feature {
+        record-id: string,
+        feature-index: u32,
+        feature-type: string,
+        start-position: u32,
+        end-position: u32,
+        strand: s8,
+    }
+
+    /// One /qualifier=value pair. Multiple qualifiers per feature arrive as
+    /// multiple rows — flattening is left to the SQL layer.
+    record genbank-qualifier {
+        record-id: string,
+        feature-index: u32,
+        name: string,
+        value: string,
+    }
+
+    /// The full DNA sequence for a record. Kept in its own relation so the
+    /// features / qualifiers tables don't drag megabases through every join.
+    record genbank-sequence {
+        record-id: string,
+        data: string,
+    }
+
+    variant parse-error {
+        malformed(string),
+        unsupported-version(string),
+    }
+
+    /// Everything a caller could want from one parse pass. The four fields
+    /// map 1:1 to the four DuckDB relations a `genbank_scan()` table
+    /// function exposes; consumers project only what they need.
+    record parsed-genbank {
+        records: list<genbank-record>,
+        features: list<genbank-feature>,
+        qualifiers: list<genbank-qualifier>,
+        sequences: list<genbank-sequence>,
+    }
+
+    /// Parse a whole GenBank file (potentially multi-record).
+    parse: func(data: list<u8>) -> result<parsed-genbank, parse-error>;
+}

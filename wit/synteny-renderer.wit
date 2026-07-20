@@ -1,0 +1,46 @@
+package tegmentum:bio@0.1.0;
+
+/// Synteny visualization as a stateless byte-emitting component. Takes the
+/// declarative intermediate tables (tracks / features / links) described in
+/// DESIGN.md and produces SVG. A future PDF or PNG renderer can implement
+/// the same interface without touching the pipeline.
+///
+/// STATUS: Draft. The intermediate table shapes are the point of the
+/// design; palette handling may migrate to a separate capability later.
+interface synteny-renderer {
+    record track {
+        track-id: string,
+        label: string,
+        length: u32,
+    }
+
+    record feature {
+        track-id: string,
+        feature-id: string,
+        start-position: u32,
+        end-position: u32,
+        strand: s8,
+        colour: option<string>,
+        label: option<string>,
+    }
+
+    record link {
+        query-track: string,
+        query-feature: string,
+        subject-track: string,
+        subject-feature: string,
+        identity: f64,
+        colour: option<string>,
+    }
+
+    variant render-error {
+        invalid-model(string),
+        empty-input,
+    }
+
+    render-svg: func(
+        tracks: list<track>,
+        features: list<feature>,
+        links: list<link>,
+    ) -> result<list<u8>, render-error>;
+}

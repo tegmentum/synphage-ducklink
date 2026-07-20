@@ -1,0 +1,53 @@
+package tegmentum:bio@0.1.0;
+
+/// The complete bio-components world. A component may export any subset
+/// of these interfaces; the DuckLink host queries the guest for what it
+/// provides and dispatches accordingly.
+world bio-components {
+    export sequence-search;
+    export genome-format;
+    export synteny-renderer;
+}
+
+/// The initial vertical slice. Concrete components implementing only
+/// BLASTN / BLASTP target this world.
+world sequence-search-only {
+    export sequence-search;
+}
+
+/// Convenience world for a GenBank-only component (a Biopython-free
+/// alternative to the current Python loader).
+world genome-format-only {
+    export genome-format;
+}
+
+/// Convenience world for a renderer-only component. Lets the alignment
+/// engine, the parser, and the visualiser ship as three independent
+/// wasm artifacts that DuckLink composes at query time.
+world synteny-renderer-only {
+    export synteny-renderer;
+}
+
+/// The DuckLink-loadable BLAST component. Exports the DuckLink dispatch
+/// surface (guest lifecycle + callback-dispatch stubs + streaming table
+/// dispatch) alongside the reusable `sequence-search` capability. Two
+/// table functions — `blastn`, `blastp` — are registered during `load()`;
+/// both delegate to the sequence-search implementation internally.
+///
+/// A pure biology consumer that only wants `sequence-search` can still
+/// use this component (the extra DuckLink exports sit unused), or build
+/// a smaller variant targeting `sequence-search-only`.
+world blast {
+    import duckdb:extension/runtime@4.0.0;
+    import duckdb:extension/config@4.0.0;
+    import duckdb:extension/logging@4.0.0;
+    import duckdb:extension/catalog@4.0.0;
+    import duckdb:extension/files@4.0.0;
+    import duckdb:extension/table-stream@4.0.0;
+
+    export duckdb:extension/guest@4.0.0;
+    export duckdb:extension/callback-dispatch@4.0.0;
+    export duckdb:extension/table-stream-dispatch@4.0.0;
+
+    export sequence-search;
+}

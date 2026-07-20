@@ -1,0 +1,36 @@
+[package]
+name = "synteny-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Handwritten SVG -- no graphics crate needed. Only wit-bindgen-rt for the
+# component-model boundary. Rlib crate-type is kept so `cargo test` on the
+# host target can exercise the pure `render` module without dragging in
+# the wasm-only bindings.
+#
+# Complex-typed args (LIST(STRUCT(...))) cross the DuckLink boundary as JSON
+# -- same escape hatch the blast component uses -- so serde / serde_json
+# ride in for arg parsing.
+[dependencies]
+wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[package.metadata.component]
+package = "tegmentum:bio-synteny-renderer"
+
+# The compound world: DuckLink's dispatch surface (guest + callback-dispatch
+# + table-stream-dispatch) plus the reusable synteny-renderer interface.
+# Same .wasm loads as a DuckLink extension AND can be invoked directly by
+# any other component-model host that mounts synteny-renderer.
+[package.metadata.component.target]
+path = "../../wit"
+# `synteny-renderer` short name is taken by the interface in the same
+# package -- the compound DuckLink world uses the `-ducklink` suffix.
+world = "synteny-renderer-ducklink"
+
+[package.metadata.component.target.dependencies]
+"duckdb:extension" = { path = "../../wit/deps/duckdb-extension" }

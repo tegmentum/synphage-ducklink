@@ -1,0 +1,10 @@
+target/
+*.wasm
+.DS_Store
+components/*/target/
+components/*/Cargo.lock
+hosts/*/target/
+hosts/*/Cargo.lock
+.idea/
+*.iml
+.vscode/

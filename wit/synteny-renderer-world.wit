@@ -1,0 +1,30 @@
+package tegmentum:bio@0.1.0;
+
+/// The DuckLink-loadable synteny-renderer component. Exports the DuckLink
+/// dispatch surface (guest lifecycle + callback-dispatch stubs + streaming
+/// table dispatch) alongside the reusable `synteny-renderer` capability.
+/// One table function -- `render_synteny_svg` -- is registered during
+/// `load()`; it emits exactly one row containing (svg BLOB, bytes_len UINTEGER).
+///
+/// A pure biology consumer that only wants `synteny-renderer` can still
+/// use this component (the extra DuckLink exports sit unused), or build
+/// a smaller variant targeting `synteny-renderer-only`.
+/// NOTE: The task brief calls for `world synteny-renderer` but that
+/// collides with the pre-existing `interface synteny-renderer` in the
+/// same package (WIT items share one top-level namespace). Named with a
+/// `-ducklink` suffix instead -- matches `synteny-renderer-only`'s
+/// naming convention in `world.wit`.
+world synteny-renderer-ducklink {
+    import duckdb:extension/runtime@4.0.0;
+    import duckdb:extension/config@4.0.0;
+    import duckdb:extension/logging@4.0.0;
+    import duckdb:extension/catalog@4.0.0;
+    import duckdb:extension/files@4.0.0;
+    import duckdb:extension/table-stream@4.0.0;
+
+    export duckdb:extension/guest@4.0.0;
+    export duckdb:extension/callback-dispatch@4.0.0;
+    export duckdb:extension/table-stream-dispatch@4.0.0;
+
+    export synteny-renderer;
+}

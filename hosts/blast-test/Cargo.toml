@@ -1,0 +1,24 @@
+[package]
+name = "blast-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = """
+Standalone native test host that loads the built `blast.wasm` component via
+wasmtime, satisfies every DuckLink import with trapping stubs (capturing the
+callback-handles the guest registers in `table_stream::register_filterable_table`),
+and drives one blastn scan end-to-end through the streaming table-dispatch
+cursor. Proves the component's DuckLink dispatch surface works without needing
+a real ducklink_{cli,core,loader}.wasm build.
+"""
+
+[[bin]]
+name = "blast-test"
+path = "src/main.rs"
+
+[dependencies]
+wasmtime = { version = "46.0.1", features = ["component-model"] }
+wasmtime-wasi = "46.0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
