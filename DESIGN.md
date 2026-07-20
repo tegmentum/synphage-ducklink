@@ -134,10 +134,20 @@ Design choices:
 
 The demo the project should be judged on:
 
+Once the extension is published to DuckDB's community extension repo, the whole demo starts with two SQL statements:
+
 ```sql
-INSTALL ducklink;
-LOAD ducklink;
-LOAD 'bio-blast.wasm';   -- the component built from this WIT
+INSTALL blast FROM community;
+LOAD blast;
+```
+
+Today, before publication, the equivalent local flow is: build `blast.wasm`, drop it into a directory, and point `ducklink --extensions-dir <dir> -- :memory: -c "LOAD blast; …"` at it. The DuckLink smoke script (`acceptance/run-ducklink.sh`) does exactly that.
+
+The acceptance query (aspirational — see the caveats below the code):
+
+```sql
+INSTALL blast FROM community;
+LOAD blast;
 
 WITH genes AS (
     SELECT * FROM genbank_features('examples/*.gb')
@@ -168,7 +178,12 @@ conservation AS (
 SELECT * FROM conservation;
 ```
 
-Compared against Synphage on the same inputs it should produce:
+**Caveats vs. what actually runs today** (see [`acceptance/run-ducklink.sh`](acceptance/run-ducklink.sh) for the working form):
+
+- `SELECT * FROM genbank_features('examples/*.gb')` — replace with `genbank_scan('<inlined-genbank-text>')` today. DuckDB's TVF binder rejects both scalar subqueries and LATERAL in table-function argument positions, so the sugar `genbank_scan((SELECT content FROM read_text('*.gb')))` doesn't bind. The extension side is already positioned to accept it the moment that DuckDB binder rule lifts. Multi-file support is a DuckDB-side concatenation until then.
+- `blastn(queries => (SELECT ...), subjects => (SELECT ...), scoring => 'blastn-default', options => {'evalue_max': 1e-5})` — replace with `blastn('<queries-json>', '<subjects-json>', '<opts-json>')` today. Same DuckDB binder rule, plus `Logicaltype::Complex("LIST(STRUCT(…))")` currently flattens to `VARCHAR[]` at DuckLink's DuckDB binder — the STRUCT payload is lost. Every DuckLink-loadable component in this repo takes JSON-string args instead. The `Duckvalue::Complex` code paths are still there for the day DuckLink learns to preserve richer type-expressions.
+
+Compared against Synphage on the same inputs the pipeline should produce:
 
 - identical best-hit selection;
 - equivalent gene-presence percentages;
