@@ -134,17 +134,24 @@ Design choices:
 
 The demo the project should be judged on:
 
-DuckLink's extension mechanism is distinct from DuckDB's native `.duckdb_extension` community-registry flow (`INSTALL … FROM community; LOAD …`) — that ships platform-specific native binaries. DuckLink loads **wasm components** dynamically: the host scans a directory (`ducklink --extensions-dir <dir>`) and DuckDB's `LOAD <name>;` is intercepted by DuckLink's extension manager, which instantiates the wasm and registers its table functions. So the invocation is a single statement:
+DuckLink ships as a native DuckDB community extension: `INSTALL ducklink FROM community;` fetches a platform-specific `.duckdb_extension` binary from DuckDB's community-extensions repo, and `LOAD ducklink;` turns on the wasm-component loading capability inside a running DuckDB. Individual wasm-component extensions like `blast` then load through the same familiar `LOAD <name>;` verb — DuckLink intercepts it and instantiates the `.wasm`. So the intended user-facing bootstrap is three statements:
 
 ```sql
+INSTALL ducklink FROM community;
+LOAD ducklink;
 LOAD blast;
 ```
 
-The DuckLink smoke script (`acceptance/run-ducklink.sh`) stages `blast.wasm` under `acceptance/build/ext/` and runs `ducklink --extensions-dir acceptance/build/ext -- :memory: -c "LOAD blast; …"`. No separate INSTALL step.
+Two deployment models cover the same wasm layer:
+
+- **DuckLink-as-DuckDB-extension** (above) — the ergonomic path for users already running DuckDB: one `INSTALL … FROM community` for DuckLink, then any wasm component `LOAD`s cleanly.
+- **Standalone `ducklink` binary** — a self-contained runner that wraps DuckDB-in-wasm + the wasm-component host in one CLI. Handy for containers, browsers, and CI. `acceptance/run-ducklink.sh` uses this form because it needs zero user-side install for the smoke test — the script stages `blast.wasm` under `acceptance/build/ext/` and runs `ducklink --extensions-dir acceptance/build/ext -- :memory: -c "LOAD blast; …"`.
 
 The acceptance query (aspirational — see the caveats below the code):
 
 ```sql
+INSTALL ducklink FROM community;
+LOAD ducklink;
 LOAD blast;
 
 WITH genes AS (
