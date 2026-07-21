@@ -153,11 +153,10 @@ SELECT * FROM blastn(…);
 
 DuckDB's own `LOAD <name>;` statement cannot be hijacked for a third-party name — `PhysicalLoad::GetDataInternal` calls `ExtensionHelper::LoadExternalExtension` unconditionally — which is why the entry point is an explicit function rather than another `LOAD` verb.
 
-**Once ducklink lands in `duckdb/community-extensions`,** the bootstrap becomes the familiar DuckDB two-liner plus one load:
+**Once ducklink lands in `duckdb/community-extensions`,** the bootstrap becomes:
 
 ```sql
-INSTALL ducklink FROM community;
-LOAD ducklink;
+LOAD ducklink FROM community;
 SELECT ducklink_load('blast');
 ```
 
@@ -169,8 +168,7 @@ Two deployment models cover the same wasm layer:
 The acceptance query (aspirational — see the caveats below the code):
 
 ```sql
-INSTALL ducklink FROM community;   -- once ducklink is merged into duckdb/community-extensions
-LOAD ducklink;
+LOAD ducklink FROM community;   -- once ducklink is merged into duckdb/community-extensions
 SELECT ducklink_load('blast');
 
 WITH genes AS (

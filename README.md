@@ -8,7 +8,7 @@ Not a fork. Not a wrapper. A reimplementation of the *shape*: the same scientifi
 
 | Synphage today                                    | synphage-ducklink                          |
 |---------------------------------------------------|--------------------------------------------|
-| `pip install` + `apt install ncbi-blast+`         | (today) preload via `DUCKLINK_COMPONENTS=blast=/…/blast.wasm`, then `LOAD 'ducklink.duckdb_extension';` — see below |
+| `pip install` + `apt install ncbi-blast+`         | (once merged) `LOAD ducklink FROM community; SELECT ducklink_load('blast');` — see below for today's local-build path |
 | Dagster server, four sequential jobs              | One SQL query                              |
 | BLAST JSON on disk, parsed via nested paths       | Typed hit rows straight from the aligner   |
 | Biopython + Polars + Pandas glue                  | DuckDB relations end to end                |
