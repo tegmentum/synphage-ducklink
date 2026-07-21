@@ -179,6 +179,29 @@ CLI (`ducklink_{core,cli,loader}.wasm` wired together via `wac plug`,
 loading `blast.wasm` as an extension). The blast + conservation +
 assertion queries all run in one DuckLink invocation.
 
+### Pure SQL (no Python, single DuckLink script)
+
+```sh
+./acceptance/run-sql-only.sh
+```
+
+The whole pipeline (`read → parse → BLAST → conservation → summary →
+assertions`) expressed as one DuckLink SQL script,
+`acceptance/pipeline-sql-only.sql`. Nothing is inlined out-of-band:
+`read_text('acceptance/data/NC_00….gb')` feeds a `SET VARIABLE`, and the
+BLAST call takes a `getvariable('q_json')` populated by an in-SQL
+`string_agg + json_quote` builder. This is what the design doc meant by
+"the whole pipeline is one SQL query" — the two DuckDB-side rules
+against subqueries in TVF argument positions are the reason we can't
+compose the whole thing as literally one statement, but a single script
+with variables and CTEs is as close as DuckDB permits today, and
+substantially the same shape once those rules lift.
+
+Also loads DuckLink's `jsonfns` extension for `json_quote` (JSON string
+escaping) and `json_extract_string` (pulling `gene`/`product` out of the
+qualifier map). No native DuckDB `json` extension needed — the compile-
+time flag disables external native extensions in this build.
+
 Prerequisites (see the repo `README.md` for the build recipe):
 - `/Users/zacharywhitley/git/ducklink/target/release/ducklink` (native host)
 - `/Users/zacharywhitley/git/ducklink/target/wasm32-wasip2/release/ducklink_{core,cli,loader}.wasm`
@@ -201,17 +224,21 @@ assertion failed or a build step errored -- same shape as
 
 ```
 acceptance/
-├── README.md         <- this file
-├── run.sh            <- mock-host driver (wasmtime + hosts/blast-test)
-├── run-ducklink.sh   <- real-DuckLink driver
-├── gb_parse.py       <- minimal GenBank -> CDS extractor
-├── pipeline.sql      <- DuckDB pipeline for run.sh (native duckdb)
-├── data/             <- input GenBank files (NC_001416, NC_001604, NC_002371)
-├── wit-view/         <- curated copy of wit/ used by the test-host bindgen
-│                       (isolated from parallel-track wit/ churn)
-└── build/            <- generated artifacts (queries/subjects.json,
-                        genome_features.tsv, hits.tsv, pipeline.out,
-                        ducklink-pipeline.sql, ext/{blast,jsonfns}.wasm)
+├── README.md              <- this file
+├── run.sh                 <- mock-host driver (wasmtime + hosts/blast-test)
+├── run-ducklink.sh        <- real-DuckLink driver (Python parses inputs, BLAST via DuckLink)
+├── run-sql-only.sh        <- pure-SQL driver (single DuckLink script, no Python)
+├── gb_parse.py            <- GenBank -> CDS extractor (used by run.sh / run-ducklink.sh)
+├── pipeline.sql           <- DuckDB pipeline for run.sh (native duckdb)
+├── pipeline-sql-only.sql  <- self-contained DuckLink script for run-sql-only.sh
+├── data/                  <- input GenBank files (NC_001416, NC_001604, NC_002371)
+├── wit-view/              <- curated copy of wit/ used by the test-host bindgen
+│                             (isolated from parallel-track wit/ churn)
+└── build/                 <- generated artifacts (queries/subjects.json,
+                              genome_features.tsv, hits.tsv, pipeline.out,
+                              ducklink-pipeline.sql,
+                              ext/{blast,jsonfns}.wasm,
+                              ext-sql-only/{blast,genome_format,jsonfns}.wasm)
 ```
 
 ## Caveats
