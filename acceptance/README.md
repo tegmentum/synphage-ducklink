@@ -150,23 +150,20 @@ lambdoid group.
 Two drivers ship. Both prep inputs the same way and produce the same
 assertion output; they differ in how the BLAST call is routed.
 
-### Mock host (fast, no DuckLink build required)
+### Mock host (RETIRED)
 
 ```sh
-./acceptance/run.sh
+./acceptance/run.sh   # exits non-zero with a pointer to the working drivers
 ```
 
-Steps:
-1. builds the blast wasm component if missing (needs `cargo-component`);
-2. builds the wasmtime test host at `hosts/blast-test/` if missing;
-3. parses the GenBank inputs (needs `python3` >= 3.11 -- no third-party
-   dependencies);
-4. runs the wasm BLASTN scan through the wasmtime mock host, which
-   reimplements just enough of DuckLink's `table-stream` protocol to
-   exercise the component ABI;
-5. runs the DuckDB pipeline via a native `duckdb` binary
-   (needs `duckdb` on `PATH` -- tested against 1.5.4);
-6. verifies the assertion markers and prints `ACCEPTANCE PASSED / FAILED`.
+Was scaffolding built when neither real-DuckLink driver worked yet. Ties
+into `hosts/blast-test/` (a wasmtime-based mock reimplementing just enough
+of DuckLink's `table_stream` protocol to run one BLASTN scan). blast has
+since been refactored to `runtime::TableRegistry` — the API that
+ducklink-extension v5.0.0 actually surfaces into DuckDB — so the mock's
+`runtime::get_capability` import trap fires and the driver no longer runs
+end-to-end. Kept in the tree for reference; the three drivers below cover
+its purpose.
 
 ### Real DuckLink (the locked-in end-to-end)
 

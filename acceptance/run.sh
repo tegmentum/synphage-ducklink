@@ -3,27 +3,47 @@
 # End-to-end acceptance test for the synphage-ducklink pipeline against
 # real NCBI phage genomes (lambda / T7 / P22).
 #
-# Stages:
-#   1. (optional) Build the blast wasm component if it isn't already
-#      present at components/blast/target/wasm32-wasip2/release/blast.wasm.
-#   2. (optional) Build the wasmtime-based test host binary.
-#   3. Parse each acceptance/data/*.gb file, extract CDS sequences +
-#      annotations, and materialise:
-#        acceptance/build/queries.json
-#        acceptance/build/subjects.json          (same content as queries)
-#        acceptance/build/genome_features.tsv
-#   4. Drive one BLASTN scan through the wasmtime host with
-#      options = {evalue_max: 1e-5}, writing hits.tsv.
-#   5. Load hits + features into DuckDB, apply the three shipped views
-#      (sql/best_hits.sql, sql/gene_conservation.sql, sql/summary.sql)
-#      and print the per-gene conservation summary.
-#   6. Assert:
-#        - at least one hit survived the evalue filter
-#        - at least one query gene is conserved in >= 1 other genome
-#        - every conservation_pct value is in [0, 100]
+# STATUS: RETIRED as of the blast v5.0.0 port.
 #
-# Exit code: 0 if all assertions pass, non-zero otherwise.
+# This driver uses hosts/blast-test/, a wasmtime-based mock host that
+# reimplements just enough of DuckLink's *streaming* table dispatch
+# (`table_stream::register_filterable_table` -> `table-stream-dispatch`
+# cursor calls) to run one BLASTN scan without needing DuckLink to be
+# built. It was scaffolding built when neither real-DuckLink driver
+# below could run yet.
+#
+# blast has since been refactored to register through `runtime::TableRegistry`
+# and dispatch through row-major `callback_dispatch::call_table` — the API
+# ducklink-extension v5.0.0 actually surfaces into DuckDB. The mock host's
+# `runtime::get_capability` import handler still traps, so this driver
+# no longer runs end-to-end. It is left in the tree for reference but the
+# three drivers below cover its purpose:
+#
+#   acceptance/run-native-duckdb.sh    <- native duckdb + ducklink extension
+#   acceptance/run-ducklink.sh         <- DuckLink wasm CLI, Python-driven
+#   acceptance/run-sql-only.sh         <- DuckLink wasm CLI, pure-SQL
+#
+# Restoring this driver means implementing runtime::TableRegistry +
+# callback_dispatch::call_table dispatch in hosts/blast-test/src/main.rs.
+# That's ~100 lines of Rust, worth it only if the mock host has to stand
+# on its own again (e.g. when both DuckLink paths are unavailable).
+#
+# --- historical stages -----------------------------------------------------
+#   1. Build the blast wasm component.
+#   2. Build the wasmtime-based test host binary.
+#   3. Parse each acceptance/data/*.gb file, extract CDS sequences.
+#   4. Drive one BLASTN scan through the wasmtime host.
+#   5. Load hits into DuckDB, apply the three sql/*.sql views.
+#   6. Assert the same three markers the other drivers check.
 set -euo pipefail
+
+echo "[run.sh] RETIRED: mock-host driver no longer runs end-to-end after the" >&2
+echo "         blast v5.0.0 port. Use:" >&2
+echo "           bash acceptance/run-native-duckdb.sh   # daily-driver shape" >&2
+echo "           bash acceptance/run-ducklink.sh        # DuckLink wasm CLI + Python" >&2
+echo "           bash acceptance/run-sql-only.sh        # DuckLink wasm CLI, pure SQL" >&2
+echo "         See the header of this file for context." >&2
+exit 2
 
 # ---------------------------------------------------------------------------
 # Path anchoring: run from the repo root regardless of CWD when invoked.

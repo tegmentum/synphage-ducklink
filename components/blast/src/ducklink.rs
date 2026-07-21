@@ -1,19 +1,40 @@
 //! DuckLink dispatch surface for the BLAST component.
 //!
-//! Implements the three Guest traits of the `duckdb-extension-table-stream`
-//! world: `guest` (lifecycle), `callback-dispatch` (scalar/aggregate/cast
-//! stubs), `table-stream-dispatch` (the streaming table cursor protocol).
+//! Registers two table functions via `runtime::TableRegistry` and dispatches
+//! them row-major through `callback_dispatch::call_table`:
 //!
-//! Two table functions are registered during `load()`:
-//! - `blastn(queries LIST(STRUCT(key VARCHAR, data VARCHAR)),
-//!            subjects LIST(STRUCT(key VARCHAR, data VARCHAR)),
-//!            options STRUCT(evalue_max DOUBLE, max_target_seqs INTEGER,
-//!                           min_identity DOUBLE))`
-//! - `blastp(...)` with the same signature.
+//! - `blastn(queries VARCHAR, subjects VARCHAR, options VARCHAR)` — JSON args.
+//! - `blastp(...)` — same signature, BLASTP-default scoring.
 //!
 //! Both delegate to `crate::run_search` with a fixed scoring preset
-//! (`BlastnDefault` / `BlastpDefault`). Tunable scoring is future work —
-//! the SQL surface stays clean for the common case first.
+//! (`BlastnDefault` / `BlastpDefault`). Tunable scoring is future work — the
+//! SQL surface stays clean for the common case first.
+//!
+//! ## Why row-major dispatch (call_table) instead of streaming
+//!
+//! ducklink-extension v5.0.0's native DuckDB path only expands table functions
+//! registered on the `runtime::TableRegistry` capability — the alternative
+//! `table_stream::register_filterable_table` route (which we previously used
+//! for optional filter pushdown and streaming) is not surfaced. Both paths are
+//! defined in the WIT, but only the runtime path is dispatched into DuckDB by
+//! the current native extension.
+//!
+//! We eagerly materialise all hits in memory anyway (Synphage-scale inputs
+//! are dozens of genomes × thousands of features), so giving up the streaming
+//! cursor costs nothing. The `pushdown` module and its tests stay in the tree
+//! as helpers ready to hook back in when the streaming path returns.
+//!
+//! ## Sample surface
+//!
+//! ```sql
+//! LOAD 'ducklink.duckdb_extension';
+//! FROM ducklink_load('blast.wasm');
+//! SELECT * FROM blastn(
+//!     '[{"key":"q1","data":"ACGT..."}]',
+//!     '[{"key":"s1","data":"ACGT..."}]',
+//!     '{"evalue_max": 1e-5}'
+//! );
+//! ```
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,42 +42,34 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
-use crate::bindings::duckdb::extension::table_stream;
+use crate::bindings::duckdb::extension::runtime::{
+    self, Capability, Extopts, TableCallback,
+};
 use crate::bindings::duckdb::extension::types::{
-    Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult, Logicaltype,
+    Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult,
+    Logicaltype, Resultset,
 };
 use crate::bindings::exports::duckdb::extension::{
     callback_dispatch, guest, table_stream_dispatch,
 };
-use crate::pushdown::{self, PushdownPlan};
 use crate::{Component, Hit, Scoring, SearchOptions, Sequence, Strand};
 
-const HANDLE_BLASTN: u32 = 1;
-const HANDLE_BLASTP: u32 = 2;
-
-/// Type-expression string carried in the `complex(...)` logicaltype for the
-/// two sequence-list args. DuckLink echoes it back verbatim as the
-/// `type-expr` field of the incoming `complexvalue`; we ignore that echo
-/// and parse the `json` payload directly.
-const TYPE_EXPR_SEQ_LIST: &str = "LIST(STRUCT(key VARCHAR, data VARCHAR))";
-const TYPE_EXPR_OPTIONS: &str =
-    "STRUCT(evalue_max DOUBLE, max_target_seqs INTEGER, min_identity DOUBLE)";
-
-/// State per open scan. `hits` is materialised eagerly by `run_search`
-/// during `call_table_open_filtered`; the cursor merely paginates it in
-/// `max-rows`-sized batches through `call_table_next`.
-struct Cursor {
-    hits: Vec<Hit>,
-    next: usize,
-    projection: Vec<u32>,
+/// Discriminator stored in `TABLE_HANDLERS` keyed by the callback handle we
+/// mint in `load()` and pass to `TableCallback::new`. The runtime threads the
+/// same handle back into `callback_dispatch::call_table`, and we use it to
+/// pick which scoring preset to run.
+#[derive(Copy, Clone)]
+enum TableHandler {
+    Blastn,
+    Blastp,
 }
 
-fn cursors() -> &'static Mutex<HashMap<u32, Cursor>> {
-    static C: OnceLock<Mutex<HashMap<u32, Cursor>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+fn table_handlers() -> &'static Mutex<HashMap<u32, TableHandler>> {
+    static M: OnceLock<Mutex<HashMap<u32, TableHandler>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn next_cursor_id() -> u32 {
+fn next_handle() -> u32 {
     static N: AtomicU32 = AtomicU32::new(1);
     N.fetch_add(1, Ordering::Relaxed)
 }
@@ -65,11 +78,56 @@ fn next_cursor_id() -> u32 {
 
 impl guest::Guest for Component {
     fn load() -> Result<Loadresult, Duckerror> {
-        let args = seq_search_arg_types();
-        let cols = hit_columns();
+        let capability = runtime::get_capability(Capabilitykind::Table).ok_or_else(|| {
+            Duckerror::Internal("blast: host did not expose table capability".into())
+        })?;
+        let registry = match capability {
+            Capability::Table(r) => r,
+            _ => {
+                return Err(Duckerror::Internal(
+                    "blast: table capability returned unexpected variant".into(),
+                ))
+            }
+        };
 
-        table_stream::register_filterable_table("blastn", &args, &cols, HANDLE_BLASTN)?;
-        table_stream::register_filterable_table("blastp", &args, &cols, HANDLE_BLASTP)?;
+        let cols = hit_columns();
+        let args = seq_search_arg_types();
+
+        let blastn_handle = next_handle();
+        table_handlers()
+            .lock()
+            .unwrap()
+            .insert(blastn_handle, TableHandler::Blastn);
+        registry.register(
+            "blastn",
+            &args,
+            &cols,
+            TableCallback::new(blastn_handle),
+            Some(&Extopts {
+                description: Some(
+                    "Nucleotide BLAST (rust-bio Smith-Waterman + Karlin-Altschul stats)".into(),
+                ),
+                tags: vec!["bioinformatics".into(), "alignment".into()],
+            }),
+        )?;
+
+        let blastp_handle = next_handle();
+        table_handlers()
+            .lock()
+            .unwrap()
+            .insert(blastp_handle, TableHandler::Blastp);
+        registry.register(
+            "blastp",
+            &args,
+            &cols,
+            TableCallback::new(blastp_handle),
+            Some(&Extopts {
+                description: Some(
+                    "Protein BLAST (rust-bio Smith-Waterman + BLOSUM62 + Karlin-Altschul)".into(),
+                ),
+                tags: vec!["bioinformatics".into(), "alignment".into()],
+            }),
+        )?;
 
         Ok(Loadresult {
             name: "blast".into(),
@@ -88,14 +146,6 @@ impl guest::Guest for Component {
 }
 
 fn seq_search_arg_types() -> Vec<Funcarg> {
-    // NOTE: The natural SQL surface would be LIST(STRUCT(key, data)) via
-    // `Logicaltype::Complex(TYPE_EXPR_SEQ_LIST)`, but DuckLink 4.0.0 flattens
-    // the type-expression string down to `VARCHAR[]` at the DuckDB binder so
-    // the STRUCT payload is lost and duckvalues arrive as a plain array of
-    // strings instead of `complex(json)`. Until DuckLink learns to preserve
-    // arbitrary type-expressions, we take three VARCHAR args carrying JSON
-    // payloads. Consumers can wrap with a DuckDB macro that hides the
-    // to_json() calls; see sql/blast_macros.sql (future).
     vec![
         Funcarg {
             name: Some("queries".into()),
@@ -142,19 +192,7 @@ fn hit_columns() -> Vec<Columndef> {
     ]
 }
 
-fn hit_columns_projected(projection: &[u32]) -> Vec<Columndef> {
-    let full = hit_columns();
-    if projection.is_empty() {
-        full
-    } else {
-        projection
-            .iter()
-            .filter_map(|&i| full.get(i as usize).cloned())
-            .collect()
-    }
-}
-
-// ---- callback-dispatch stubs (table-only extension) -------------------
+// ---- callback-dispatch: real call_table, stubs for the rest -----------
 
 impl callback_dispatch::Guest for Component {
     fn call_scalar_batch_col(
@@ -162,176 +200,106 @@ impl callback_dispatch::Guest for Component {
         _args: Vec<callback_dispatch::Colvec>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("blast exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_aggregate_col(
         _handle: u32,
         _args: Vec<callback_dispatch::Colvec>,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("blast exports no aggregates"))
+        Err(unsupported("no aggregates"))
     }
     fn call_cast_col(
         _handle: u32,
         _arg: callback_dispatch::Colvec,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("blast exports no casts"))
+        Err(unsupported("no casts"))
     }
     fn call_scalar(
         _handle: u32,
         _args: Vec<Duckvalue>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("blast exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_table(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-    ) -> Result<callback_dispatch::Resultset, Duckerror> {
-        Err(unsupported(
-            "blast uses the streaming table dispatch, not the row-major one",
-        ))
+        handle: u32,
+        args: Vec<Duckvalue>,
+    ) -> Result<Resultset, Duckerror> {
+        let handler = table_handlers()
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .copied()
+            .ok_or_else(|| {
+                Duckerror::Internal(format!("blast: unknown table handle {handle}"))
+            })?;
+
+        let queries = parse_sequence_list(args.get(0), "queries")?;
+        let subjects = parse_sequence_list(args.get(1), "subjects")?;
+        let options = parse_options(args.get(2))?;
+
+        let scoring = match handler {
+            TableHandler::Blastn => Scoring::BlastnDefault,
+            TableHandler::Blastp => Scoring::BlastpDefault,
+        };
+
+        let hits = crate::run_search(&queries, &subjects, &scoring, &options)
+            .map_err(search_error_to_duck)?;
+
+        Ok(hits.iter().map(hit_to_row).collect())
     }
     fn call_pragma(
         _handle: u32,
         _args: Vec<Duckvalue>,
     ) -> Result<Option<Duckvalue>, Duckerror> {
-        Err(unsupported("blast exports no pragmas"))
+        Err(unsupported("no pragmas"))
     }
-    fn call_cast(
-        _handle: u32,
-        _value: Duckvalue,
-    ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("blast exports no casts"))
+    fn call_cast(_handle: u32, _value: Duckvalue) -> Result<Duckvalue, Duckerror> {
+        Err(unsupported("no casts"))
     }
 }
 
 fn unsupported(msg: &str) -> Duckerror {
-    Duckerror::Unsupported(msg.into())
+    Duckerror::Unsupported(format!("blast: {msg}"))
 }
 
-// ---- streaming table dispatch -----------------------------------------
+// ---- streaming-table stubs: world exports the interface but no functions
+// are registered on it, so every dispatch returns "not supported". Ready to
+// hook back in when v5.x learns to dispatch streaming tables.
 
 impl table_stream_dispatch::Guest for Component {
     fn call_table_open(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
+        _handle: u32,
+        _args: Vec<Duckvalue>,
+        _projection: Vec<u32>,
     ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        open_inner(handle, args, projection, PushdownPlan::default())
+        Err(unsupported(
+            "no streaming table functions registered; dispatch uses call_table",
+        ))
     }
-
     fn call_table_open_filtered(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
-        filters: Vec<table_stream_dispatch::TableFilter>,
+        _handle: u32,
+        _args: Vec<Duckvalue>,
+        _projection: Vec<u32>,
+        _filters: Vec<table_stream_dispatch::TableFilter>,
     ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        // Filter pushdown: recognise the handful of clauses we can profitably
-        // absorb (evalue ceiling, identity floor, key restrictions, strand)
-        // and let the DuckLink core re-check anything unrecognised above the
-        // scan — that's still correct per the freeze policy, just less
-        // efficient. See `pushdown::plan` for the full recognition set.
-        let plan = pushdown::plan(&filters);
-        open_inner(handle, args, projection, plan)
+        Err(unsupported(
+            "no streaming table functions registered; dispatch uses call_table",
+        ))
     }
-
     fn call_table_next(
         _handle: u32,
-        cursor: u32,
-        max_rows: u32,
+        _cursor: u32,
+        _max_rows: u32,
     ) -> Result<table_stream_dispatch::Resultset, Duckerror> {
-        let mut guard = cursors().lock().unwrap();
-        let cur = guard.get_mut(&cursor).ok_or_else(|| {
-            Duckerror::Invalidstate(format!("blast: unknown cursor {cursor}"))
-        })?;
-
-        let mut rows: Vec<Vec<Duckvalue>> = Vec::new();
-        while cur.next < cur.hits.len() && (rows.len() as u32) < max_rows {
-            let hit = &cur.hits[cur.next];
-            cur.next += 1;
-            rows.push(project(hit_to_row(hit), &cur.projection));
-        }
-        Ok(rows)
+        Err(unsupported("no streaming cursors"))
     }
-
-    fn call_table_close(_handle: u32, cursor: u32) -> Result<bool, Duckerror> {
-        Ok(cursors().lock().unwrap().remove(&cursor).is_some())
+    fn call_table_close(_handle: u32, _cursor: u32) -> Result<bool, Duckerror> {
+        Ok(false)
     }
 }
 
-fn open_inner(
-    handle: u32,
-    args: Vec<Duckvalue>,
-    projection: Vec<u32>,
-    plan: PushdownPlan,
-) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-    let mut queries = parse_sequence_list(args.get(0), "queries")?;
-    let mut subjects = parse_sequence_list(args.get(1), "subjects")?;
-    let mut options = parse_options(args.get(2))?;
-
-    let scoring = match handle {
-        HANDLE_BLASTN => Scoring::BlastnDefault,
-        HANDLE_BLASTP => Scoring::BlastpDefault,
-        other => {
-            return Err(Duckerror::Invalidstate(format!(
-                "blast: unknown callback handle {other}"
-            )));
-        }
-    };
-
-    let hits = if plan.short_circuit {
-        // The pushed filter set is unsatisfiable (e.g. contradictory key
-        // clauses). Open an empty cursor and skip alignment entirely.
-        Vec::new()
-    } else {
-        pushdown::tighten_options(&plan, &mut options);
-        let batches_empty = pushdown::prune_batches(&plan, &mut queries, &mut subjects);
-        if batches_empty {
-            Vec::new()
-        } else {
-            let raw = crate::run_search(&queries, &subjects, &scoring, &options)
-                .map_err(search_error_to_duck)?;
-            // The scoring params ran both strands for BLASTN; a
-            // `WHERE strand = 'plus'|'minus'` clause is honoured by
-            // dropping the non-matching orientation post-alignment. This
-            // wastes minus-strand work when strand='plus' is pinned, but
-            // stays contained and correct — the alternative would need to
-            // reach into `scoring::resolve` from the dispatch layer.
-            if let Some(sf) = plan.strand_keep {
-                raw.into_iter().filter(|h| sf.matches(h.strand)).collect()
-            } else {
-                raw
-            }
-        }
-    };
-
-    let id = next_cursor_id();
-    let projected_cols = hit_columns_projected(&projection);
-    cursors().lock().unwrap().insert(
-        id,
-        Cursor {
-            hits,
-            next: 0,
-            projection,
-        },
-    );
-
-    Ok(table_stream_dispatch::TableOpenResult {
-        cursor: id,
-        columns: projected_cols,
-    })
-}
-
-fn project(row: Vec<Duckvalue>, projection: &[u32]) -> Vec<Duckvalue> {
-    if projection.is_empty() {
-        row
-    } else {
-        projection
-            .iter()
-            .map(|&i| row.get(i as usize).cloned().unwrap_or(Duckvalue::Null))
-            .collect()
-    }
-}
+// ---- row emission ------------------------------------------------------
 
 fn hit_to_row(hit: &Hit) -> Vec<Duckvalue> {
     let strand_str = match hit.strand {

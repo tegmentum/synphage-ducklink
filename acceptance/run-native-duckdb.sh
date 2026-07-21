@@ -76,8 +76,10 @@ done
 # ---------------------------------------------------------------------------
 # 2) Run the pipeline.
 #
-# DUCKLINK_COMPONENTS names each wasm component up front (this is DuckDB's
-# extension-load lifecycle: catalog registration happens at LOAD time).
+# v5.0.0 API: LOAD 'ducklink.duckdb_extension', then `FROM ducklink_load(<path>)`
+# once per component (ducklink_load is a table function). The v0.2.0-era
+# DUCKLINK_COMPONENTS env-preload no longer surfaces functions into the
+# catalog on v5.0.0 — explicit loads are the current path.
 #
 # We pass data_dir as a SQL variable via `duckdb -cmd` so pipeline-native.sql
 # stays free of absolute paths. -unsigned is required because both the
@@ -86,10 +88,11 @@ done
 # ---------------------------------------------------------------------------
 SQL_LOG="${BUILD_DIR}/pipeline-native.out"
 log "running native DuckDB + ducklink extension"
-DUCKLINK_COMPONENTS="blast=${COMPONENT_BLAST}:genome_format=${COMPONENT_GENOME}" \
 "${DUCKDB_BIN}" -unsigned \
-    -cmd "SET VARIABLE data_dir = '${DATA_DIR}';" \
     -cmd "LOAD '${DUCKLINK_EXT}';" \
+    -cmd "FROM ducklink_load('${COMPONENT_BLAST}');" \
+    -cmd "FROM ducklink_load('${COMPONENT_GENOME}');" \
+    -cmd "SET VARIABLE data_dir = '${DATA_DIR}';" \
     < "${PIPELINE_SQL}" \
     2>&1 | tee "${SQL_LOG}"
 
