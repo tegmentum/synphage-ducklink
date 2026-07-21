@@ -134,31 +134,44 @@ Design choices:
 
 The demo the project should be judged on:
 
-DuckLink ships as a native DuckDB community extension: `INSTALL ducklink FROM community;` fetches a platform-specific `.duckdb_extension` binary from DuckDB's community-extensions repo, and `LOAD ducklink;` turns on the wasm-component loading capability inside a running DuckDB. Individual wasm-component extensions like `blast` then load through DuckLink's explicit `ducklink_load` entry point — DuckDB's own `LOAD` statement cannot be intercepted for a third-party name (see the native-extension `passthrough.rs` docstring: `PhysicalLoad::GetDataInternal` calls `ExtensionHelper::LoadExternalExtension` unconditionally), so `ducklink_load(<name>)` is the seam. It is exposed three ways for convenience:
+DuckLink is a native DuckDB community extension (crate: [`ducklink-extension`](https://github.com/tegmentum/ducklink-extension), currently v5.0.0, WIT contract `duckdb:extension@4.0.0`). It embeds `wasmtime` inside a running DuckDB and bridges each loaded wasm component's registered functions into DuckDB's catalog.
 
-- `SELECT ducklink_load('blast')` — scalar function
-- `PRAGMA ducklink_load('blast')` — PRAGMA
-- `CALL ducklink_load('blast')` — table function (fires at a statement boundary where catalog mutation is safe)
+**Today (pre-community-merge):** the extension isn't yet in `duckdb/community-extensions`, so users build the `.duckdb_extension` locally and `LOAD` it from a filesystem path. Components are named up front via the `DUCKLINK_COMPONENTS` env var (a `:`-separated list of `name=path` entries) — DuckDB's extension-load lifecycle registers catalog entries once at LOAD time, so the components have to be known before the LOAD runs:
 
-So the intended user-facing bootstrap is:
+```sh
+DUCKLINK_COMPONENTS=blast=/path/to/blast.wasm \
+    duckdb -unsigned -c "LOAD 'ducklink.duckdb_extension'; SELECT * FROM blastn(…);"
+```
+
+**In-SQL loading — `ducklink_load(<name>)` scalar:** ducklink-extension also registers a scalar function `ducklink_load('name')` that resolves the component by *catalog name* (not a filesystem path), fetches / verifies / caches the blob, and registers its functions:
+
+```sql
+LOAD 'ducklink.duckdb_extension';
+SELECT ducklink_load('blast');   -- resolves 'blast' via the catalog
+SELECT * FROM blastn(…);
+```
+
+DuckDB's own `LOAD <name>;` statement cannot be hijacked for a third-party name — `PhysicalLoad::GetDataInternal` calls `ExtensionHelper::LoadExternalExtension` unconditionally — which is why the entry point is an explicit function rather than another `LOAD` verb.
+
+**Once ducklink lands in `duckdb/community-extensions`,** the bootstrap becomes the familiar DuckDB two-liner plus one load:
 
 ```sql
 INSTALL ducklink FROM community;
 LOAD ducklink;
-CALL ducklink_load('blast');
+SELECT ducklink_load('blast');
 ```
 
 Two deployment models cover the same wasm layer:
 
-- **DuckLink-as-DuckDB-extension** (above) — the ergonomic path for users already running DuckDB: one `INSTALL … FROM community` for DuckLink, then any wasm component loads via `ducklink_load(<name>)`.
-- **Standalone `ducklink` binary** — a self-contained runner that wraps DuckDB-in-wasm + the wasm-component host in one CLI. Handy for containers, browsers, and CI. The CLI adds a `parse_load_names` preprocessor that recognises `LOAD <name>;` inputs and rewrites them through the same wasm loading path, so under the standalone CLI you can type either `LOAD blast;` or the canonical `CALL ducklink_load('blast');`. `acceptance/run-ducklink.sh` uses this form because it needs zero user-side install for the smoke test — it stages `blast.wasm` under `acceptance/build/ext/` and runs `ducklink --extensions-dir acceptance/build/ext -- :memory: -c "LOAD blast; …"`.
+- **DuckLink-as-DuckDB-extension** (above) — the ergonomic path for users already running native DuckDB. Native DuckDB loads `ducklink.duckdb_extension`, which embeds wasmtime and runs the wasm component inside the DuckDB process. A single portable component extends DuckDB on every platform without per-platform native extension builds.
+- **Standalone `ducklink` binary** — a self-contained runner that wraps DuckDB-in-wasm + the wasm-component host in one CLI. Handy for containers, browsers, and CI. The CLI's `parse_load_names` preprocessor recognises `LOAD <name>;` inputs and rewrites them through the same wasm loading path, so under the standalone CLI `LOAD blast;` works too. `acceptance/run-ducklink.sh` uses this form because it needs zero user-side install for the smoke test — it stages `blast.wasm` under `acceptance/build/ext/` and runs `ducklink --extensions-dir acceptance/build/ext -- :memory: -c "LOAD blast; …"`.
 
 The acceptance query (aspirational — see the caveats below the code):
 
 ```sql
-INSTALL ducklink FROM community;
+INSTALL ducklink FROM community;   -- once ducklink is merged into duckdb/community-extensions
 LOAD ducklink;
-CALL ducklink_load('blast');
+SELECT ducklink_load('blast');
 
 WITH genes AS (
     SELECT * FROM genbank_features('examples/*.gb')
