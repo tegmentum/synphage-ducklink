@@ -134,19 +134,17 @@ Design choices:
 
 The demo the project should be judged on:
 
-Once the extension is published to DuckDB's community extension repo, the whole demo starts with two SQL statements:
+DuckLink's extension mechanism is distinct from DuckDB's native `.duckdb_extension` community-registry flow (`INSTALL … FROM community; LOAD …`) — that ships platform-specific native binaries. DuckLink loads **wasm components** dynamically: the host scans a directory (`ducklink --extensions-dir <dir>`) and DuckDB's `LOAD <name>;` is intercepted by DuckLink's extension manager, which instantiates the wasm and registers its table functions. So the invocation is a single statement:
 
 ```sql
-INSTALL blast FROM community;
 LOAD blast;
 ```
 
-Today, before publication, the equivalent local flow is: build `blast.wasm`, drop it into a directory, and point `ducklink --extensions-dir <dir> -- :memory: -c "LOAD blast; …"` at it. The DuckLink smoke script (`acceptance/run-ducklink.sh`) does exactly that.
+The DuckLink smoke script (`acceptance/run-ducklink.sh`) stages `blast.wasm` under `acceptance/build/ext/` and runs `ducklink --extensions-dir acceptance/build/ext -- :memory: -c "LOAD blast; …"`. No separate INSTALL step.
 
 The acceptance query (aspirational — see the caveats below the code):
 
 ```sql
-INSTALL blast FROM community;
 LOAD blast;
 
 WITH genes AS (
