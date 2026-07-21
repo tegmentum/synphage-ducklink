@@ -179,7 +179,28 @@ CLI (`ducklink_{core,cli,loader}.wasm` wired together via `wac plug`,
 loading `blast.wasm` as an extension). The blast + conservation +
 assertion queries all run in one DuckLink invocation.
 
-### Pure SQL (no Python, single DuckLink script)
+### Native DuckDB (the daily-driver target)
+
+```sh
+./acceptance/run-native-duckdb.sh
+```
+
+Uses the native `duckdb` CLI plus the `ducklink.duckdb_extension` native
+community extension (currently built locally at
+`../ducklink-extension/build/release/`; once ducklink lands in
+`duckdb/community-extensions` this becomes `LOAD ducklink FROM
+community;`). This is the shape an ordinary DuckDB user will run.
+
+Uses DuckDB's built-in `json` extension (autoloaded) — no `jsonfns`
+needed here. Builds the queries JSON as
+`to_json(list(struct_pack(...)))`.
+
+Everything else is the same as `run-sql-only.sh`: `read_text` +
+`SET VARIABLE` + `getvariable` + `genbank_scan` + `blastn` + conservation
+views + assertions. 40 hits, 8 conserved. `ACCEPTANCE-NATIVE-DUCKDB
+PASSED`.
+
+### Pure SQL under the DuckLink wasm CLI
 
 ```sh
 ./acceptance/run-sql-only.sh
@@ -224,22 +245,23 @@ assertion failed or a build step errored -- same shape as
 
 ```
 acceptance/
-├── README.md              <- this file
-├── run.sh                 <- mock-host driver (wasmtime + hosts/blast-test)
-├── run-ducklink.sh        <- real-DuckLink driver (Python parses inputs, BLAST via DuckLink)
-├── run-sql-only.sh        <- pure-SQL driver (single DuckLink script, no Python)
-├── gb_parse.py            <- GenBank -> CDS extractor (used by run.sh / run-ducklink.sh)
-├── pipeline.sql           <- DuckDB pipeline for run.sh (native duckdb)
-├── pipeline-sql-only.sql  <- self-contained DuckLink script for run-sql-only.sh
-├── data/                  <- input GenBank files (NC_001416, NC_001604, NC_002371)
-├── wit-view/              <- curated copy of wit/ used by the test-host bindgen
-│                             (isolated from parallel-track wit/ churn)
-└── build/                 <- generated artifacts (queries/subjects.json,
-                              genome_features.tsv, hits.tsv, pipeline.out,
-                              ducklink-pipeline.sql,
-                              ext/{blast,jsonfns}.wasm,
-                              ext-sql-only/{blast,genome_format,jsonfns}.wasm)
+├── README.md               <- this file
+├── run.sh                  <- mock-host driver (wasmtime + hosts/blast-test)
+├── run-ducklink.sh         <- real-DuckLink-wasm driver (Python parses inputs)
+├── run-sql-only.sh         <- pure-SQL driver on the DuckLink wasm CLI
+├── run-native-duckdb.sh    <- pure-SQL driver on NATIVE DuckDB + ducklink extension  ★
+├── gb_parse.py             <- GenBank -> CDS extractor (used by run.sh / run-ducklink.sh)
+├── pipeline.sql            <- DuckDB pipeline for run.sh (native duckdb)
+├── pipeline-sql-only.sql   <- DuckLink-CLI script for run-sql-only.sh
+├── pipeline-native.sql     <- Native-DuckDB script for run-native-duckdb.sh  ★
+├── data/                   <- input GenBank files (NC_001416, NC_001604, NC_002371)
+├── wit-view/               <- curated copy of wit/ used by the test-host bindgen
+│                              (isolated from parallel-track wit/ churn)
+└── build/                  <- generated artifacts
 ```
+
+★ run-native-duckdb.sh is the target daily-driver — the shape ordinary
+DuckDB users will invoke once ducklink is in duckdb/community-extensions.
 
 ## Caveats
 
