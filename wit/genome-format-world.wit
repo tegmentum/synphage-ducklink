@@ -1,16 +1,21 @@
 package tegmentum:bio@0.1.0;
 
-/// The DuckLink-loadable genome-format component. Exports the DuckLink
-/// dispatch surface (guest lifecycle + callback-dispatch stubs + streaming
-/// table dispatch) alongside the reusable `genome-format` capability.
+/// The DuckLink-loadable genome-format component. Exports DuckLink's
+/// guest lifecycle + callback-dispatch alongside the reusable
+/// `genome-format` capability.
 ///
-/// One table function — `genbank_scan(paths VARCHAR)` — is registered during
-/// `load()`. It reads each file at the supplied path(s) through the wasi
-/// filesystem preopens, hands the bytes to the same `parse` this component
-/// exports as `tegmentum:bio/genome-format`, and emits one row per feature
-/// in the parsed relations — a "wide" projection that lets a SQL caller do
-/// `SELECT feature_type, sequence FROM genbank_scan(...) WHERE ...` without
-/// re-joining the four base relations.
+/// Two table functions — `genbank_scan(contents VARCHAR)` and
+/// `genbank_read_path(path VARCHAR)` — are registered during `load()`
+/// via `runtime::TableRegistry`. A replacement scan on `.gb` / `.gbk`
+/// (registered via the `files` import) rewrites `SELECT * FROM
+/// 'lambda.gb'` to `genbank_read_path('lambda.gb')` at parse time.
+///
+/// NOTE: We deliberately do NOT import `duckdb:extension/table-stream`
+/// or export `duckdb:extension/table-stream-dispatch`. Those interfaces
+/// are DEPRECATED in ducklink-extension v5.0.0 (see STABILITY.md;
+/// removal scheduled for the next MAJOR bump), and no host has consumed
+/// registrations from them since v4.6.0. The row-major
+/// `callback-dispatch::call-table` path is the only one still wired.
 ///
 /// A pure biology consumer that only wants `genome-format` can still use
 /// this component (the extra DuckLink exports sit unused), or build a
@@ -21,11 +26,9 @@ world genome-format-ducklink {
     import duckdb:extension/logging@4.0.0;
     import duckdb:extension/catalog@4.0.0;
     import duckdb:extension/files@4.0.0;
-    import duckdb:extension/table-stream@4.0.0;
 
     export duckdb:extension/guest@4.0.0;
     export duckdb:extension/callback-dispatch@4.0.0;
-    export duckdb:extension/table-stream-dispatch@4.0.0;
 
     export genome-format;
 }

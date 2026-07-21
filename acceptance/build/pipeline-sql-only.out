@@ -62,4 +62,4 @@ D> ...> ...> ...> ...> ...> | assertion            | status | observed |
 D> ...> ...> ...> ...> ...> | assertion           | status | observed |
 +---------------------+--------+----------+
 | ASSERT_PCT_IN_RANGE | OK     | 0        |
-D> 
+D> [wasi-fs] resolve start path='/Users/zacharywhitley/git/synphage-ducklink/acceptance/build/mem.duckdb.wal.checkpoint' normalized='Users/zacharywhitley/git/synphage-ducklink/acceptance/build/mem.duckdb.wal.checkpoint'

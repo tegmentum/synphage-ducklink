@@ -78,13 +78,13 @@ interface sequence-search {
     /// Filters applied at the component boundary. Callers may set none,
     /// one, or all; the SQL layer can filter further.
     ///
-    /// The five knobs are the same recognition set the earlier DuckLink
-    /// `table-stream` filter-pushdown planner supported. When (or if) the
-    /// streaming path returns and a DuckDB `WHERE` clause reaches the
-    /// component as a `list<table-filter>`, that planner can fold them
-    /// into this same record; today they are passed explicitly by the
-    /// caller because the row-major `callback-dispatch::call-table`
-    /// runtime dispatch path receives no filters.
+    /// The five knobs are the recognition set the earlier DuckLink
+    /// `table-stream` filter-pushdown planner supported. That path is
+    /// now DEPRECATED (ducklink-extension v5.0.0 STABILITY.md; removal
+    /// scheduled for ducklink v6.0.0), and the current
+    /// `runtime::TableRegistry` dispatch surface receives no filter
+    /// argument — so callers pass filter intent explicitly here. This
+    /// is the long-term shape, not a transitional workaround.
     record search-options {
         /// Drop alignments whose E-value exceeds this ceiling.
         evalue-max: option<f64>,

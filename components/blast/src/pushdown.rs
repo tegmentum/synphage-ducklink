@@ -1,18 +1,36 @@
 //! Filter-pushdown planner for the blast component.
 //!
-//! **Historical note.** The original planner (git history: through commit
-//! `f8afef6`) was fed the conjunctive `list<table-filter>` DuckDB pushes
-//! into an extension's `call-table-open-filtered` export — the streaming
-//! `table-stream` dispatch path. ducklink-extension v5.0.0 does not
-//! dispatch that path, so blast now registers on the row-major
-//! `runtime::TableRegistry` path (`callback-dispatch::call-table`), which
-//! receives `(handle, args)` with **no filter argument**.
+//! ## Design
 //!
-//! To preserve the pushdown semantics without a filter channel, the same
-//! knobs move onto the `SearchOptions` record — callers pass filter intent
-//! explicitly in the JSON `options` VARCHAR. When (or if) the streaming
-//! path returns, a thin adapter can fold `TableFilter` values back into
-//! `SearchOptions` and everything below still works.
+//! The recognition set lives on the `SearchOptions` record and callers
+//! pass filter intent explicitly in the JSON `options` VARCHAR. This is
+//! the **permanent** shape for the current DuckLink contract — not an
+//! interim workaround.
+//!
+//! ducklink-extension v5.0.0's STABILITY.md marks
+//! `duckdb:extension/{table-stream, table-stream-dispatch}` — the
+//! original DuckDB filter-pushdown path — DEPRECATED, scheduled for
+//! removal at the next `duckdb:extension` MAJOR bump (ducklink v6.0.0).
+//! No host has consumed registrations from them since v4.6.0. The
+//! deprecation policy requires two MINOR releases between the
+//! announcement (v5.0.0) and removal, so the path stays alive through
+//! at least v5.1 and v5.2, then is gone at v6.0. Building against it
+//! today would ship dead bindgen surface and break at v6.0 without
+//! adding any real behavior first.
+//!
+//! `runtime::TableRegistry` + `callback-dispatch::call-table` is the
+//! current and only long-term dispatch path; it receives
+//! `(handle, args)` with no filter argument, so the caller must supply
+//! filter intent through the arguments themselves. That mechanism is the
+//! whole reason these knobs live on `SearchOptions`.
+//!
+//! ## Historical note
+//!
+//! The original planner (git history: through commit `f8afef6`) was fed
+//! the conjunctive `list<table-filter>` DuckDB pushed into an
+//! extension's `call-table-open-filtered` export. The recognition +
+//! merge logic is unchanged; only the input shape moved from
+//! `TableFilter` records to `SearchOptions` fields.
 //!
 //! Five recognition patterns are preserved:
 //!

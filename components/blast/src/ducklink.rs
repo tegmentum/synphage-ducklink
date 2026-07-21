@@ -10,19 +10,16 @@
 //! (`BlastnDefault` / `BlastpDefault`). Tunable scoring is future work — the
 //! SQL surface stays clean for the common case first.
 //!
-//! ## Why row-major dispatch (call_table) instead of streaming
+//! ## Why row-major dispatch (call_table)
 //!
-//! ducklink-extension v5.0.0's native DuckDB path only expands table functions
-//! registered on the `runtime::TableRegistry` capability — the alternative
-//! `table_stream::register_filterable_table` route (which we previously used
-//! for optional filter pushdown and streaming) is not surfaced. Both paths are
-//! defined in the WIT, but only the runtime path is dispatched into DuckDB by
-//! the current native extension.
-//!
-//! We eagerly materialise all hits in memory anyway (Synphage-scale inputs
-//! are dozens of genomes × thousands of features), so giving up the streaming
-//! cursor costs nothing. The `pushdown` module and its tests stay in the tree
-//! as helpers ready to hook back in when the streaming path returns.
+//! ducklink-extension v5.0.0's STABILITY.md marks the alternative
+//! `duckdb:extension/{table-stream, table-stream-dispatch}` interfaces
+//! DEPRECATED, scheduled for removal at the next `duckdb:extension` MAJOR
+//! bump (ducklink v6.0.0); no host has consumed registrations from them
+//! since v4.6.0. `runtime::TableRegistry` is the current and only
+//! long-term dispatch path for wasm-component table functions. Filter
+//! pushdown semantics live on the `sequence-search::search-options`
+//! record instead of a separate filter channel — see `pushdown.rs`.
 //!
 //! ## Sample surface
 //!
@@ -49,9 +46,7 @@ use crate::bindings::duckdb::extension::types::{
     Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult,
     Logicaltype, Resultset,
 };
-use crate::bindings::exports::duckdb::extension::{
-    callback_dispatch, guest, table_stream_dispatch,
-};
+use crate::bindings::exports::duckdb::extension::{callback_dispatch, guest};
 use crate::{Component, Hit, Scoring, SearchOptions, Sequence, Strand};
 
 /// Discriminator stored in `TABLE_HANDLERS` keyed by the callback handle we
@@ -265,42 +260,6 @@ impl callback_dispatch::Guest for Component {
 
 fn unsupported(msg: &str) -> Duckerror {
     Duckerror::Unsupported(format!("blast: {msg}"))
-}
-
-// ---- streaming-table stubs: world exports the interface but no functions
-// are registered on it, so every dispatch returns "not supported". Ready to
-// hook back in when v5.x learns to dispatch streaming tables.
-
-impl table_stream_dispatch::Guest for Component {
-    fn call_table_open(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-        _projection: Vec<u32>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        Err(unsupported(
-            "no streaming table functions registered; dispatch uses call_table",
-        ))
-    }
-    fn call_table_open_filtered(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-        _projection: Vec<u32>,
-        _filters: Vec<table_stream_dispatch::TableFilter>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        Err(unsupported(
-            "no streaming table functions registered; dispatch uses call_table",
-        ))
-    }
-    fn call_table_next(
-        _handle: u32,
-        _cursor: u32,
-        _max_rows: u32,
-    ) -> Result<table_stream_dispatch::Resultset, Duckerror> {
-        Err(unsupported("no streaming cursors"))
-    }
-    fn call_table_close(_handle: u32, _cursor: u32) -> Result<bool, Duckerror> {
-        Ok(false)
-    }
 }
 
 // ---- row emission ------------------------------------------------------

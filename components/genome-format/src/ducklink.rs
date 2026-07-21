@@ -17,18 +17,18 @@
 //!   `genbank_read_path('lambda.gb')` at parse time — sidesteps the
 //!   DuckDB TVF-subquery binder rule entirely.
 //!
-//! ## Why row-major dispatch (call_table) instead of streaming
+//! ## Why row-major dispatch (call_table)
 //!
-//! The replacement-scan mechanism looks up its target table function via
-//! `runtime`'s `table_handle_names` registry, which is populated only by
-//! `runtime::TableRegistry::register`. Table functions registered through
-//! the alternative `table_stream::register_filterable_table` path (which
-//! we previously used) land in a different registry entirely — the
-//! replacement scan can't reach them. So both `genbank_scan` and
-//! `genbank_read_path` are registered on the runtime path and dispatched
-//! row-major via `callback_dispatch::call_table`. Filter pushdown and
-//! streaming are unavailable on this path; for GenBank workloads (bounded
-//! by file size, always materialised in one pass anyway) that is fine.
+//! `runtime::TableRegistry` is the current and only long-term dispatch
+//! path for wasm-component table functions.
+//! `duckdb:extension/{table-stream, table-stream-dispatch}` are marked
+//! DEPRECATED in ducklink-extension v5.0.0's STABILITY.md, scheduled for
+//! removal at the next MAJOR bump (ducklink v6.0.0); no host has consumed
+//! registrations from them since v4.6.0. The replacement-scan mechanism
+//! also looks up its target function via the runtime registry
+//! specifically — so registering here is required regardless. GenBank
+//! workloads are bounded by file size and always materialised in one
+//! pass anyway.
 //!
 //! ## Composing with DuckDB's read_text
 //!
@@ -59,9 +59,7 @@ use crate::bindings::duckdb::extension::types::{
     Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult,
     Logicaltype, Resultset,
 };
-use crate::bindings::exports::duckdb::extension::{
-    callback_dispatch, guest, table_stream_dispatch,
-};
+use crate::bindings::exports::duckdb::extension::{callback_dispatch, guest};
 use crate::model::{Parsed, Qualifier};
 use crate::{parser, Component};
 
@@ -299,41 +297,6 @@ impl callback_dispatch::Guest for Component {
 
 fn unsupported(msg: &str) -> Duckerror {
     Duckerror::Unsupported(format!("genome-format: {msg}"))
-}
-
-// ---- streaming-table stubs: world exports this interface but we register
-// nothing here, so every dispatch is a "no such handle" error.
-
-impl table_stream_dispatch::Guest for Component {
-    fn call_table_open(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-        _projection: Vec<u32>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        Err(unsupported(
-            "no streaming table functions registered; dispatch uses call_table",
-        ))
-    }
-    fn call_table_open_filtered(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-        _projection: Vec<u32>,
-        _filters: Vec<table_stream_dispatch::TableFilter>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        Err(unsupported(
-            "no streaming table functions registered; dispatch uses call_table",
-        ))
-    }
-    fn call_table_next(
-        _handle: u32,
-        _cursor: u32,
-        _max_rows: u32,
-    ) -> Result<table_stream_dispatch::Resultset, Duckerror> {
-        Err(unsupported("no streaming cursors"))
-    }
-    fn call_table_close(_handle: u32, _cursor: u32) -> Result<bool, Duckerror> {
-        Ok(false)
-    }
 }
 
 // ---- argument parsing --------------------------------------------------

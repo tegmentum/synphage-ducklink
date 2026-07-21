@@ -28,11 +28,20 @@ world synteny-renderer-only {
     export synteny-renderer;
 }
 
-/// The DuckLink-loadable BLAST component. Exports the DuckLink dispatch
-/// surface (guest lifecycle + callback-dispatch stubs + streaming table
-/// dispatch) alongside the reusable `sequence-search` capability. Two
-/// table functions — `blastn`, `blastp` — are registered during `load()`;
-/// both delegate to the sequence-search implementation internally.
+/// The DuckLink-loadable BLAST component. Exports DuckLink's guest
+/// lifecycle + callback-dispatch alongside the reusable `sequence-search`
+/// capability. Two table functions — `blastn`, `blastp` — are registered
+/// during `load()` via `runtime::TableRegistry` (the row-major dispatch
+/// path); both delegate to the sequence-search implementation internally.
+///
+/// NOTE: We deliberately do NOT import `duckdb:extension/table-stream` or
+/// export `duckdb:extension/table-stream-dispatch`. Those interfaces are
+/// marked DEPRECATED in ducklink-extension v5.0.0's STABILITY.md and are
+/// scheduled for removal at the next `duckdb:extension` MAJOR bump
+/// (ducklink v6.0.0). No host has consumed registrations from them since
+/// v4.6.0, so declaring them in our world would only add dead bindgen
+/// surface. Filter-pushdown semantics are preserved by folding the
+/// recognition set into the `sequence-search::search-options` record.
 ///
 /// A pure biology consumer that only wants `sequence-search` can still
 /// use this component (the extra DuckLink exports sit unused), or build
@@ -43,11 +52,9 @@ world blast {
     import duckdb:extension/logging@4.0.0;
     import duckdb:extension/catalog@4.0.0;
     import duckdb:extension/files@4.0.0;
-    import duckdb:extension/table-stream@4.0.0;
 
     export duckdb:extension/guest@4.0.0;
     export duckdb:extension/callback-dispatch@4.0.0;
-    export duckdb:extension/table-stream-dispatch@4.0.0;
 
     export sequence-search;
 }

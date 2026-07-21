@@ -48,36 +48,21 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 
-use crate::bindings::duckdb::extension::table_stream;
+use crate::bindings::duckdb::extension::runtime::{self, Capability, Extopts, TableCallback};
 use crate::bindings::duckdb::extension::types::{
-    Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult, Logicaltype,
+    Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult,
+    Logicaltype, Resultset,
 };
-use crate::bindings::exports::duckdb::extension::{
-    callback_dispatch, guest, table_stream_dispatch,
-};
+use crate::bindings::exports::duckdb::extension::{callback_dispatch, guest};
 use crate::render::{self, Feature, Link, RenderError, Track};
 use crate::Component;
 
-const HANDLE_RENDER: u32 = 1;
-
-/// State per open scan. Rendering runs up-front in `call_table_open_*`; the
-/// cursor just holds the resulting bytes and hands them out once.
-///
-/// `payload = None` marks an empty-input open (RenderError::EmptyInput). In
-/// that case `already_emitted` stays true throughout so `call_table_next`
-/// always returns zero rows -- the empty resultset the task requires.
-struct Cursor {
-    payload: Option<Vec<u8>>,
-    already_emitted: bool,
-    projection: Vec<u32>,
+fn table_handles() -> &'static Mutex<HashMap<u32, ()>> {
+    static M: OnceLock<Mutex<HashMap<u32, ()>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cursors() -> &'static Mutex<HashMap<u32, Cursor>> {
-    static C: OnceLock<Mutex<HashMap<u32, Cursor>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn next_cursor_id() -> u32 {
+fn next_handle() -> u32 {
     static N: AtomicU32 = AtomicU32::new(1);
     N.fetch_add(1, Ordering::Relaxed)
 }
@@ -86,14 +71,34 @@ fn next_cursor_id() -> u32 {
 
 impl guest::Guest for Component {
     fn load() -> Result<Loadresult, Duckerror> {
-        let args = render_arg_types();
-        let cols = svg_columns();
+        let capability = runtime::get_capability(Capabilitykind::Table).ok_or_else(|| {
+            Duckerror::Internal(
+                "synteny-renderer: host did not expose table capability".into(),
+            )
+        })?;
+        let registry = match capability {
+            Capability::Table(r) => r,
+            _ => {
+                return Err(Duckerror::Internal(
+                    "synteny-renderer: table capability returned unexpected variant".into(),
+                ))
+            }
+        };
 
-        table_stream::register_filterable_table(
+        let handle = next_handle();
+        table_handles().lock().unwrap().insert(handle, ());
+        registry.register(
             "render_synteny_svg",
-            &args,
-            &cols,
-            HANDLE_RENDER,
+            &render_arg_types(),
+            &svg_columns(),
+            TableCallback::new(handle),
+            Some(&Extopts {
+                description: Some(
+                    "Render a synteny plot as SVG bytes from JSON-encoded tracks / features / links"
+                        .into(),
+                ),
+                tags: vec!["visualization".into(), "genomics".into()],
+            }),
         )?;
 
         Ok(Loadresult {
@@ -149,19 +154,7 @@ fn svg_columns() -> Vec<Columndef> {
     ]
 }
 
-fn svg_columns_projected(projection: &[u32]) -> Vec<Columndef> {
-    let full = svg_columns();
-    if projection.is_empty() {
-        full
-    } else {
-        projection
-            .iter()
-            .filter_map(|&i| full.get(i as usize).cloned())
-            .collect()
-    }
-}
-
-// ---- callback-dispatch stubs (table-only extension) -------------------
+// ---- callback-dispatch: real call_table, stubs for the rest -----------
 
 impl callback_dispatch::Guest for Component {
     fn call_scalar_batch_col(
@@ -169,159 +162,71 @@ impl callback_dispatch::Guest for Component {
         _args: Vec<callback_dispatch::Colvec>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("synteny-renderer exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_aggregate_col(
         _handle: u32,
         _args: Vec<callback_dispatch::Colvec>,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("synteny-renderer exports no aggregates"))
+        Err(unsupported("no aggregates"))
     }
     fn call_cast_col(
         _handle: u32,
         _arg: callback_dispatch::Colvec,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("synteny-renderer exports no casts"))
+        Err(unsupported("no casts"))
     }
     fn call_scalar(
         _handle: u32,
         _args: Vec<Duckvalue>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("synteny-renderer exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_table(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-    ) -> Result<callback_dispatch::Resultset, Duckerror> {
-        Err(unsupported(
-            "synteny-renderer uses the streaming table dispatch, not the row-major one",
-        ))
+        handle: u32,
+        args: Vec<Duckvalue>,
+    ) -> Result<Resultset, Duckerror> {
+        if !table_handles().lock().unwrap().contains_key(&handle) {
+            return Err(Duckerror::Internal(format!(
+                "synteny-renderer: unknown table handle {handle}"
+            )));
+        }
+
+        let tracks = parse_tracks(args.get(0))?;
+        let features = parse_features(args.get(1))?;
+        let links = parse_links(args.get(2))?;
+
+        // EmptyInput -> zero-row result; other errors -> Invalidargument.
+        // `SELECT * FROM render_synteny_svg(NULL, NULL, NULL)` gets an
+        // empty resultset rather than a SQL exception.
+        match render::render_svg(&tracks, &features, &links) {
+            Ok(bytes) => {
+                let bytes_len = bytes.len() as u32;
+                Ok(vec![vec![
+                    Duckvalue::Blob(bytes),
+                    Duckvalue::Uint32(bytes_len),
+                ]])
+            }
+            Err(RenderError::EmptyInput) => Ok(Vec::new()),
+            Err(RenderError::InvalidModel(msg)) => Err(Duckerror::Invalidargument(format!(
+                "synteny-renderer: {msg}"
+            ))),
+        }
     }
     fn call_pragma(
         _handle: u32,
         _args: Vec<Duckvalue>,
     ) -> Result<Option<Duckvalue>, Duckerror> {
-        Err(unsupported("synteny-renderer exports no pragmas"))
+        Err(unsupported("no pragmas"))
     }
     fn call_cast(_handle: u32, _value: Duckvalue) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("synteny-renderer exports no casts"))
+        Err(unsupported("no casts"))
     }
 }
 
 fn unsupported(msg: &str) -> Duckerror {
-    Duckerror::Unsupported(msg.into())
-}
-
-// ---- streaming table dispatch -----------------------------------------
-
-impl table_stream_dispatch::Guest for Component {
-    fn call_table_open(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        open_inner(handle, args, projection)
-    }
-
-    fn call_table_open_filtered(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
-        _filters: Vec<table_stream_dispatch::TableFilter>,
-    ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        // Filter pushdown ignored -- correctness holds because the DuckLink
-        // core re-checks any pushed filters above the scan. Only two
-        // columns (svg, bytes_len) come out per open anyway, so there is
-        // nothing meaningful to prune at this layer.
-        open_inner(handle, args, projection)
-    }
-
-    fn call_table_next(
-        _handle: u32,
-        cursor: u32,
-        max_rows: u32,
-    ) -> Result<table_stream_dispatch::Resultset, Duckerror> {
-        let mut guard = cursors().lock().unwrap();
-        let cur = guard.get_mut(&cursor).ok_or_else(|| {
-            Duckerror::Invalidstate(format!("synteny-renderer: unknown cursor {cursor}"))
-        })?;
-
-        // Zero-row result on empty input, or on any subsequent poll after
-        // the single payload row has been emitted -- both signal EOF.
-        if max_rows == 0 || cur.already_emitted {
-            return Ok(Vec::new());
-        }
-        let Some(payload) = cur.payload.take() else {
-            cur.already_emitted = true;
-            return Ok(Vec::new());
-        };
-        cur.already_emitted = true;
-
-        let bytes_len = payload.len() as u32;
-        let row = vec![Duckvalue::Blob(payload), Duckvalue::Uint32(bytes_len)];
-        Ok(vec![project(row, &cur.projection)])
-    }
-
-    fn call_table_close(_handle: u32, cursor: u32) -> Result<bool, Duckerror> {
-        Ok(cursors().lock().unwrap().remove(&cursor).is_some())
-    }
-}
-
-fn open_inner(
-    handle: u32,
-    args: Vec<Duckvalue>,
-    projection: Vec<u32>,
-) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-    if handle != HANDLE_RENDER {
-        return Err(Duckerror::Invalidstate(format!(
-            "synteny-renderer: unknown callback handle {handle}"
-        )));
-    }
-
-    let tracks = parse_tracks(args.get(0))?;
-    let features = parse_features(args.get(1))?;
-    let links = parse_links(args.get(2))?;
-
-    // EmptyInput -> zero-row cursor; other errors -> Invalidargument. That
-    // way callers can `SELECT * FROM render_synteny_svg(NULL, NULL, NULL)`
-    // and get an empty resultset rather than a SQL exception.
-    let (payload, already_emitted) = match render::render_svg(&tracks, &features, &links) {
-        Ok(bytes) => (Some(bytes), false),
-        Err(RenderError::EmptyInput) => (None, true),
-        Err(RenderError::InvalidModel(msg)) => {
-            return Err(Duckerror::Invalidargument(format!(
-                "synteny-renderer: {msg}"
-            )));
-        }
-    };
-
-    let id = next_cursor_id();
-    let projected_cols = svg_columns_projected(&projection);
-    cursors().lock().unwrap().insert(
-        id,
-        Cursor {
-            payload,
-            already_emitted,
-            projection,
-        },
-    );
-
-    Ok(table_stream_dispatch::TableOpenResult {
-        cursor: id,
-        columns: projected_cols,
-    })
-}
-
-fn project(row: Vec<Duckvalue>, projection: &[u32]) -> Vec<Duckvalue> {
-    if projection.is_empty() {
-        row
-    } else {
-        projection
-            .iter()
-            .map(|&i| row.get(i as usize).cloned().unwrap_or(Duckvalue::Null))
-            .collect()
-    }
+    Duckerror::Unsupported(format!("synteny-renderer: {msg}"))
 }
 
 // ---- arg parsing ------------------------------------------------------
