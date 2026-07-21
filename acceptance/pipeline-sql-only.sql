@@ -136,7 +136,7 @@ FROM gene_conservation
 GROUP BY query_genome, query_feature_key, query_gene, query_product
 ORDER BY query_genome, query_feature_key;
 
--- Per-genome overview.
+.print === per-genome overview ===
 SELECT query_genome,
        count(*)                                    AS query_genes,
        count(DISTINCT subject_genome)              AS n_other_genomes,
@@ -145,12 +145,14 @@ SELECT query_genome,
 FROM gene_conservation
 GROUP BY query_genome ORDER BY query_genome;
 
--- Conserved genes report.
+.print === conserved genes ===
 SELECT query_genome, query_feature_key, query_gene, query_product,
        n_conserved_in_genomes, round(avg_percent_identity, 2) AS avg_id
 FROM gene_conservation_summary
 WHERE n_conserved_in_genomes > 0
 ORDER BY query_genome, query_feature_key;
+
+.print === assertions ===
 
 -- Assertion rows (grepped by the shell driver).
 SELECT 'ASSERT_HITS_NONZERO' AS assertion,
