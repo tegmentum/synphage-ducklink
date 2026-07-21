@@ -1,80 +1,63 @@
 //! DuckLink dispatch surface for the genome-format component.
 //!
-//! Implements the three Guest traits of the `duckdb-extension-table-stream`
-//! world: `guest` (lifecycle), `callback-dispatch` (scalar/aggregate/cast
-//! stubs), `table-stream-dispatch` (the streaming table cursor protocol).
+//! Registers two table functions plus a replacement scan, all routed through
+//! `runtime::TableRegistry` (the row-major `callback_dispatch::call_table`
+//! path — the only registration path the `.gb` / `.gbk` replacement scan can
+//! reference, since the replacement-scan handle registry looks up names via
+//! the runtime-side `table_handle_names` populated only by that call).
 //!
-//! One table function is registered during `load()`:
-//! - `genbank_scan(contents VARCHAR)` — takes a single VARCHAR carrying
-//!   the raw GenBank text (may contain multiple LOCUS records concatenated
-//!   together — the parser already handles multi-record input), runs it
-//!   through the same parser this component exports as
-//!   `tegmentum:bio/genome-format`, and emits one row per feature with a
-//!   "wide" projection that includes the qualifier map (as a JSON string)
-//!   and the feature's extracted DNA sequence.
+//! - `genbank_scan(contents VARCHAR)` — parses raw GenBank text passed as a
+//!   VARCHAR. Multi-record files (multiple LOCUS blocks separated by `//`)
+//!   are handled by the parser.
+//! - `genbank_read_path(path VARCHAR)` — reads the file at `path` from
+//!   inside the extension via `std::fs::read`, then hands the bytes to the
+//!   same parser.
+//! - **Replacement scan** on file extensions `.gb` / `.gbk` (mode:
+//!   ExtensionOnly): `SELECT * FROM 'lambda.gb'` rewrites to
+//!   `genbank_read_path('lambda.gb')` at parse time — sidesteps the
+//!   DuckDB TVF-subquery binder rule entirely.
 //!
-//! ## Why `contents VARCHAR` instead of `paths VARCHAR`
+//! ## Why row-major dispatch (call_table) instead of streaming
 //!
-//! Wasm extensions run in the DuckLink loader's WASI sandbox, and the
-//! `--dir HOST::GUEST` preopens registered on the CLI do NOT thread through
-//! to loaded extension instances — `std::fs::read` from inside an extension
-//! always returns `No such file or directory`, even for paths that DuckDB
-//! itself can open. Rather than build a bespoke file-reading host import,
-//! we let DuckDB do what it's already good at (I/O + globbing via
-//! `read_text`) and take just the bytes.
+//! The replacement-scan mechanism looks up its target table function via
+//! `runtime`'s `table_handle_names` registry, which is populated only by
+//! `runtime::TableRegistry::register`. Table functions registered through
+//! the alternative `table_stream::register_filterable_table` path (which
+//! we previously used) land in a different registry entirely — the
+//! replacement scan can't reach them. So both `genbank_scan` and
+//! `genbank_read_path` are registered on the runtime path and dispatched
+//! row-major via `callback_dispatch::call_table`. Filter pushdown and
+//! streaming are unavailable on this path; for GenBank workloads (bounded
+//! by file size, always materialised in one pass anyway) that is fine.
 //!
-//! ## Intended composition
+//! ## Composing with DuckDB's read_text
 //!
-//! Single file (composed via `read_text`, in a DuckDB build that permits
-//! subqueries as TVF arguments):
-//!
-//! ```sql
-//! SELECT *
-//! FROM genbank_scan((SELECT content FROM read_text('lambda.gb')));
-//! ```
-//!
-//! Multi-file glob (concatenate with a newline so the parser sees a
-//! properly separated stream of LOCUS records):
+//! With the replacement scan wired, the daily-driver invocation is:
 //!
 //! ```sql
-//! SELECT *
-//! FROM genbank_scan((
-//!     SELECT string_agg(content, chr(10))
-//!     FROM read_text('data/*.gb')
-//! ));
+//! SELECT * FROM 'lambda.gb';
+//! SELECT * FROM 'phages/*.gb';   -- DuckDB expands the glob before matching
 //! ```
 //!
-//! A SQL macro is the natural next sugar to hide the sub-select, e.g.
-//!
-//! ```sql
-//! CREATE OR REPLACE MACRO genbank_files(glob) AS TABLE
-//!     SELECT * FROM genbank_scan((
-//!         SELECT string_agg(content, chr(10)) FROM read_text(glob)
-//!     ));
-//! ```
-//!
-//! Note: DuckLink 4.0.0's vendored DuckDB binder currently rejects both
-//! scalar subqueries (`Table function cannot contain subqueries`) and
-//! LATERAL column references (`only supports literals as parameters`) in
-//! TVF argument position. Until that lifts, callers who want to skip the
-//! macro have to inline the file contents as a SQL string literal — which
-//! is exactly what the acceptance harness does. `read_text` itself works
-//! fine, so the moment the binder learns TVF subqueries the sub-select
-//! form above becomes the daily-driver.
-//!
-//! Filter pushdown is not implemented on this first pass: the DuckLink core
-//! re-checks every pushed filter above the scan, so correctness holds — we
-//! simply forgo the optimisation. `call_table_open_filtered` reduces to
-//! `call_table_open`.
+//! When file access is unavailable (e.g. the standalone DuckLink CLI does
+//! not thread `--dir` preopens through to loaded extensions), users fall
+//! back to `genbank_scan(<inlined-content>)` or, in DuckDB builds that
+//! permit TVF-arg subqueries, `genbank_scan((SELECT content FROM
+//! read_text('lambda.gb')))`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use crate::bindings::duckdb::extension::table_stream;
+use crate::bindings::duckdb::extension::files::{
+    self, DetectionMode, ReplacementScan,
+};
+use crate::bindings::duckdb::extension::runtime::{
+    self, Capability, Extopts, TableCallback,
+};
 use crate::bindings::duckdb::extension::types::{
     Capabilitykind, Columndef, Complexvalue, Duckerror, Duckvalue, Funcarg, Loadresult,
-    Logicaltype,
+    Logicaltype, Resultset,
 };
 use crate::bindings::exports::duckdb::extension::{
     callback_dispatch, guest, table_stream_dispatch,
@@ -82,25 +65,24 @@ use crate::bindings::exports::duckdb::extension::{
 use crate::model::{Parsed, Qualifier};
 use crate::{parser, Component};
 
-const HANDLE_GENBANK_SCAN: u32 = 1;
-
-/// One row of the wide feature projection `genbank_scan` emits. Kept in
-/// memory between `call_table_open_filtered` and the paginating
-/// `call_table_next` calls — Synphage-scale inputs are dozens of genomes
-/// with thousands of features apiece, comfortably below the point where we
-/// need a lazy per-file iterator.
-struct Cursor {
-    rows: Vec<Vec<Duckvalue>>,
-    next: usize,
-    projection: Vec<u32>,
+/// Discriminator stored in `TABLE_HANDLERS` keyed by the callback handle we
+/// mint in `load()` and pass to `TableCallback::new`. The runtime threads
+/// that same handle back into `callback_dispatch::call_table`, and we use it
+/// to pick which parser front-end to invoke.
+#[derive(Copy, Clone)]
+enum TableHandler {
+    /// `genbank_scan(contents VARCHAR)` — parse a VARCHAR of GenBank text.
+    Scan,
+    /// `genbank_read_path(path VARCHAR)` — read the file at `path`, parse.
+    ReadPath,
 }
 
-fn cursors() -> &'static Mutex<HashMap<u32, Cursor>> {
-    static C: OnceLock<Mutex<HashMap<u32, Cursor>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
+fn table_handlers() -> &'static Mutex<HashMap<u32, TableHandler>> {
+    static M: OnceLock<Mutex<HashMap<u32, TableHandler>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn next_cursor_id() -> u32 {
+fn next_handle() -> u32 {
     static N: AtomicU32 = AtomicU32::new(1);
     N.fetch_add(1, Ordering::Relaxed)
 }
@@ -109,15 +91,70 @@ fn next_cursor_id() -> u32 {
 
 impl guest::Guest for Component {
     fn load() -> Result<Loadresult, Duckerror> {
-        let args = genbank_scan_arg_types();
+        let capability = runtime::get_capability(Capabilitykind::Table).ok_or_else(|| {
+            Duckerror::Internal("genome-format: host did not expose table capability".into())
+        })?;
+        let registry = match capability {
+            Capability::Table(r) => r,
+            _ => {
+                return Err(Duckerror::Internal(
+                    "genome-format: table capability returned unexpected variant".into(),
+                ))
+            }
+        };
         let cols = feature_columns();
 
-        table_stream::register_filterable_table(
+        // 1) genbank_scan(contents VARCHAR).
+        let scan_handle = next_handle();
+        table_handlers()
+            .lock()
+            .unwrap()
+            .insert(scan_handle, TableHandler::Scan);
+        registry.register(
             "genbank_scan",
-            &args,
+            &contents_arg_types(),
             &cols,
-            HANDLE_GENBANK_SCAN,
+            TableCallback::new(scan_handle),
+            Some(&Extopts {
+                description: Some(
+                    "Parse a VARCHAR of raw GenBank text into wide feature rows".into(),
+                ),
+                tags: vec!["genomics".into(), "genbank".into()],
+            }),
         )?;
+
+        // 2) genbank_read_path(path VARCHAR) — captured for the replacement scan.
+        let read_path_handle = next_handle();
+        table_handlers()
+            .lock()
+            .unwrap()
+            .insert(read_path_handle, TableHandler::ReadPath);
+        let read_path_reg_id = registry.register(
+            "genbank_read_path",
+            &path_arg_types(),
+            &cols,
+            TableCallback::new(read_path_handle),
+            Some(&Extopts {
+                description: Some(
+                    "Read a GenBank file at the given path and emit wide feature rows".into(),
+                ),
+                tags: vec!["genomics".into(), "genbank".into()],
+            }),
+        )?;
+
+        // 3) Wire the replacement scan: `SELECT * FROM 'lambda.gb'` -> the
+        //    read-path function. ExtensionOnly matches on the string suffix;
+        //    Signature would peek at the file bytes for detection.
+        files::register_replacement_scan(&ReplacementScan {
+            extensions: vec!["gb".into(), "gbk".into()],
+            table_function: read_path_reg_id,
+            mode: DetectionMode::ExtensionOnly,
+        })
+        .map_err(|e| {
+            Duckerror::Internal(format!(
+                "genome-format: register_replacement_scan(gb, gbk): {e}"
+            ))
+        })?;
 
         Ok(Loadresult {
             name: "genome-format".into(),
@@ -135,13 +172,16 @@ impl guest::Guest for Component {
     }
 }
 
-fn genbank_scan_arg_types() -> Vec<Funcarg> {
-    // Single VARCHAR carrying the raw GenBank text. See the module doc for
-    // why this isn't a path or a LIST(STRUCT(...)): WASI preopens don't
-    // thread through to extensions, and DuckLink 4.0.0's Complex(...) type
-    // erases to VARCHAR[] at the binder anyway.
+fn contents_arg_types() -> Vec<Funcarg> {
     vec![Funcarg {
         name: Some("contents".into()),
+        logical: Logicaltype::Text,
+    }]
+}
+
+fn path_arg_types() -> Vec<Funcarg> {
+    vec![Funcarg {
+        name: Some("path".into()),
         logical: Logicaltype::Text,
     }]
 }
@@ -175,19 +215,7 @@ fn feature_columns() -> Vec<Columndef> {
     ]
 }
 
-fn feature_columns_projected(projection: &[u32]) -> Vec<Columndef> {
-    let full = feature_columns();
-    if projection.is_empty() {
-        full
-    } else {
-        projection
-            .iter()
-            .filter_map(|&i| full.get(i as usize).cloned())
-            .collect()
-    }
-}
-
-// ---- callback-dispatch stubs (table-only extension) -------------------
+// ---- callback-dispatch: real call_table, stubs for the rest -----------
 
 impl callback_dispatch::Guest for Component {
     fn call_scalar_batch_col(
@@ -195,147 +223,116 @@ impl callback_dispatch::Guest for Component {
         _args: Vec<callback_dispatch::Colvec>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("genome-format exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_aggregate_col(
         _handle: u32,
         _args: Vec<callback_dispatch::Colvec>,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("genome-format exports no aggregates"))
+        Err(unsupported("no aggregates"))
     }
     fn call_cast_col(
         _handle: u32,
         _arg: callback_dispatch::Colvec,
     ) -> Result<callback_dispatch::Colvec, Duckerror> {
-        Err(unsupported("genome-format exports no casts"))
+        Err(unsupported("no casts"))
     }
     fn call_scalar(
         _handle: u32,
         _args: Vec<Duckvalue>,
         _ctx: callback_dispatch::Invokeinfo,
     ) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("genome-format exports no scalar functions"))
+        Err(unsupported("no scalar functions"))
     }
     fn call_table(
-        _handle: u32,
-        _args: Vec<Duckvalue>,
-    ) -> Result<callback_dispatch::Resultset, Duckerror> {
-        Err(unsupported(
-            "genome-format uses the streaming table dispatch, not the row-major one",
-        ))
+        handle: u32,
+        args: Vec<Duckvalue>,
+    ) -> Result<Resultset, Duckerror> {
+        let handler = table_handlers()
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .copied()
+            .ok_or_else(|| {
+                Duckerror::Internal(format!("genome-format: unknown table handle {handle}"))
+            })?;
+
+        let bytes: Vec<u8> = match handler {
+            TableHandler::Scan => parse_contents_arg(args.first())?.into_bytes(),
+            TableHandler::ReadPath => {
+                let path = parse_path_arg(args.first())?;
+                std::fs::read(&path).map_err(|e| {
+                    Duckerror::Io(format!(
+                        "genbank_read_path: cannot read '{path}': {e}. \
+                         If this DuckLink build does not grant filesystem access to \
+                         extensions, read the file with DuckDB's read_text and call \
+                         genbank_scan(<contents>) instead."
+                    ))
+                })?
+            }
+        };
+
+        let parsed = parser::parse_genbank(&bytes).map_err(|e| {
+            let reason = match e {
+                crate::model::ParseError::Malformed(m) => m,
+                crate::model::ParseError::UnsupportedVersion(m) => {
+                    format!("unsupported version: {m}")
+                }
+            };
+            Duckerror::Invalidargument(format!("genome-format: cannot parse GenBank: {reason}"))
+        })?;
+
+        let mut rows: Vec<Vec<Duckvalue>> = Vec::new();
+        emit_rows(&parsed, &mut rows);
+        Ok(rows)
     }
     fn call_pragma(
         _handle: u32,
         _args: Vec<Duckvalue>,
     ) -> Result<Option<Duckvalue>, Duckerror> {
-        Err(unsupported("genome-format exports no pragmas"))
+        Err(unsupported("no pragmas"))
     }
     fn call_cast(_handle: u32, _value: Duckvalue) -> Result<Duckvalue, Duckerror> {
-        Err(unsupported("genome-format exports no casts"))
+        Err(unsupported("no casts"))
     }
 }
 
 fn unsupported(msg: &str) -> Duckerror {
-    Duckerror::Unsupported(msg.into())
+    Duckerror::Unsupported(format!("genome-format: {msg}"))
 }
 
-// ---- streaming table dispatch -----------------------------------------
+// ---- streaming-table stubs: world exports this interface but we register
+// nothing here, so every dispatch is a "no such handle" error.
 
 impl table_stream_dispatch::Guest for Component {
     fn call_table_open(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
+        _handle: u32,
+        _args: Vec<Duckvalue>,
+        _projection: Vec<u32>,
     ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        open_inner(handle, args, projection)
+        Err(unsupported(
+            "no streaming table functions registered; dispatch uses call_table",
+        ))
     }
-
     fn call_table_open_filtered(
-        handle: u32,
-        args: Vec<Duckvalue>,
-        projection: Vec<u32>,
+        _handle: u32,
+        _args: Vec<Duckvalue>,
+        _projection: Vec<u32>,
         _filters: Vec<table_stream_dispatch::TableFilter>,
     ) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-        // Filter pushdown is ignored on this first pass. Per the DuckLink
-        // freeze policy the core re-checks every pushed filter above the
-        // scan, so correctness holds — we just forgo the optimisation.
-        open_inner(handle, args, projection)
+        Err(unsupported(
+            "no streaming table functions registered; dispatch uses call_table",
+        ))
     }
-
     fn call_table_next(
         _handle: u32,
-        cursor: u32,
-        max_rows: u32,
+        _cursor: u32,
+        _max_rows: u32,
     ) -> Result<table_stream_dispatch::Resultset, Duckerror> {
-        let mut guard = cursors().lock().unwrap();
-        let cur = guard.get_mut(&cursor).ok_or_else(|| {
-            Duckerror::Invalidstate(format!("genome-format: unknown cursor {cursor}"))
-        })?;
-
-        let mut out: Vec<Vec<Duckvalue>> = Vec::new();
-        while cur.next < cur.rows.len() && (out.len() as u32) < max_rows {
-            let row = cur.rows[cur.next].clone();
-            cur.next += 1;
-            out.push(project(row, &cur.projection));
-        }
-        Ok(out)
+        Err(unsupported("no streaming cursors"))
     }
-
-    fn call_table_close(_handle: u32, cursor: u32) -> Result<bool, Duckerror> {
-        Ok(cursors().lock().unwrap().remove(&cursor).is_some())
-    }
-}
-
-fn open_inner(
-    handle: u32,
-    args: Vec<Duckvalue>,
-    projection: Vec<u32>,
-) -> Result<table_stream_dispatch::TableOpenResult, Duckerror> {
-    if handle != HANDLE_GENBANK_SCAN {
-        return Err(Duckerror::Invalidstate(format!(
-            "genome-format: unknown callback handle {handle}"
-        )));
-    }
-
-    let contents = parse_contents_arg(args.first())?;
-    let parsed = parser::parse_genbank(contents.as_bytes()).map_err(|e| {
-        let reason = match e {
-            crate::model::ParseError::Malformed(m) => m,
-            crate::model::ParseError::UnsupportedVersion(m) => {
-                format!("unsupported version: {m}")
-            }
-        };
-        Duckerror::Invalidargument(format!("genbank_scan: cannot parse contents: {reason}"))
-    })?;
-
-    let mut rows: Vec<Vec<Duckvalue>> = Vec::new();
-    emit_rows(&parsed, &mut rows);
-
-    let id = next_cursor_id();
-    let projected_cols = feature_columns_projected(&projection);
-    cursors().lock().unwrap().insert(
-        id,
-        Cursor {
-            rows,
-            next: 0,
-            projection,
-        },
-    );
-
-    Ok(table_stream_dispatch::TableOpenResult {
-        cursor: id,
-        columns: projected_cols,
-    })
-}
-
-fn project(row: Vec<Duckvalue>, projection: &[u32]) -> Vec<Duckvalue> {
-    if projection.is_empty() {
-        row
-    } else {
-        projection
-            .iter()
-            .map(|&i| row.get(i as usize).cloned().unwrap_or(Duckvalue::Null))
-            .collect()
+    fn call_table_close(_handle: u32, _cursor: u32) -> Result<bool, Duckerror> {
+        Ok(false)
     }
 }
 
@@ -349,6 +346,15 @@ fn parse_contents_arg(v: Option<&Duckvalue>) -> Result<String, Duckerror> {
         Some(Duckvalue::Complex(Complexvalue { json, .. })) => Ok(json.clone()),
         _ => Err(Duckerror::Invalidargument(
             "genbank_scan: 'contents' must be a VARCHAR carrying raw GenBank text".into(),
+        )),
+    }
+}
+
+fn parse_path_arg(v: Option<&Duckvalue>) -> Result<String, Duckerror> {
+    match v {
+        Some(Duckvalue::Text(s)) => Ok(s.clone()),
+        _ => Err(Duckerror::Invalidargument(
+            "genbank_read_path: 'path' must be a VARCHAR filesystem path".into(),
         )),
     }
 }
