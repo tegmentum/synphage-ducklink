@@ -77,6 +77,14 @@ interface sequence-search {
 
     /// Filters applied at the component boundary. Callers may set none,
     /// one, or all; the SQL layer can filter further.
+    ///
+    /// The five knobs are the same recognition set the earlier DuckLink
+    /// `table-stream` filter-pushdown planner supported. When (or if) the
+    /// streaming path returns and a DuckDB `WHERE` clause reaches the
+    /// component as a `list<table-filter>`, that planner can fold them
+    /// into this same record; today they are passed explicitly by the
+    /// caller because the row-major `callback-dispatch::call-table`
+    /// runtime dispatch path receives no filters.
     record search-options {
         /// Drop alignments whose E-value exceeds this ceiling.
         evalue-max: option<f64>,
@@ -88,6 +96,17 @@ interface sequence-search {
         /// Drop alignments whose percent identity is below this floor
         /// (0.0 – 100.0).
         min-identity: option<f64>,
+        /// Whitelist of query keys to run. `none` = run every query in
+        /// `queries`; `some([])` = run nothing (short-circuit). Non-matching
+        /// query rows are dropped BEFORE alignment.
+        query-keys: option<list<string>>,
+        /// Whitelist of subject keys to run. Same semantics as `query-keys`
+        /// but applied to the subject batch.
+        subject-keys: option<list<string>>,
+        /// Restrict emitted hits to one strand. `plus` and `minus` are the
+        /// only accepted labels; anything else is treated as `none`.
+        /// BLASTP is always plus; the field is meaningful for BLASTN.
+        strand: option<string>,
     }
 
     /// One pairwise local alignment. Positions are 1-indexed and inclusive

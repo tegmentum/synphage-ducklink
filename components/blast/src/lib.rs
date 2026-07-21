@@ -38,7 +38,15 @@ impl SequenceSearchGuest for Component {
 
 /// The one place both the sequence-search Guest impl and the DuckLink
 /// bridge come together. Everything above is thin marshalling; everything
-/// interesting lives in align.rs / scoring.rs / strand.rs / filter.rs.
+/// interesting lives in align.rs / scoring.rs / strand.rs / filter.rs /
+/// pushdown.rs.
+///
+/// `options` may include the pushdown fields (`query_keys`, `subject_keys`,
+/// `strand`). They tighten the scan BEFORE alignment (prune batches,
+/// short-circuit on empty key list) and post-filter hits by strand — the
+/// same recognition set the earlier DuckLink `table-stream` filter-pushdown
+/// planner supported, now folded into the caller's `SearchOptions` because
+/// the row-major runtime dispatch path receives no filter argument.
 pub(crate) fn run_search(
     queries: &[Sequence],
     subjects: &[Sequence],
@@ -52,10 +60,22 @@ pub(crate) fn run_search(
         return Err(SearchError::EmptySubjects);
     }
 
+    let plan = pushdown::plan_from_options(options);
+    if plan.short_circuit {
+        return Ok(Vec::new());
+    }
+
+    // Clone before pruning so callers can reuse their input slices.
+    let mut queries: Vec<Sequence> = queries.to_vec();
+    let mut subjects: Vec<Sequence> = subjects.to_vec();
+    if pushdown::prune_batches(&plan, &mut queries, &mut subjects) {
+        return Ok(Vec::new());
+    }
+
     let params = scoring::resolve(scoring).map_err(SearchError::InvalidScoring)?;
     let mut hits: Vec<Hit> = Vec::new();
 
-    for q in queries {
+    for q in &queries {
         let query_bytes = q.data.as_bytes();
         if query_bytes.is_empty() {
             return Err(SearchError::InvalidSequence(format!(
@@ -63,7 +83,7 @@ pub(crate) fn run_search(
                 q.key
             )));
         }
-        for s in subjects {
+        for s in &subjects {
             let subject_bytes = s.data.as_bytes();
             if subject_bytes.is_empty() {
                 return Err(SearchError::InvalidSequence(format!(
@@ -100,7 +120,8 @@ pub(crate) fn run_search(
         }
     }
 
-    Ok(filter::apply(hits, options))
+    let hits = filter::apply(hits, options);
+    Ok(pushdown::keep_strand(&plan, hits))
 }
 
 /// One (query, subject, orientation) alignment. Returns None if the

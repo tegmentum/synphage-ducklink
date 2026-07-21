@@ -243,6 +243,10 @@ impl callback_dispatch::Guest for Component {
             TableHandler::Blastp => Scoring::BlastpDefault,
         };
 
+        // Pushdown fields on `options` (query_keys, subject_keys, strand)
+        // are honored inside `run_search` — both the DuckLink dispatch
+        // (here) and the biology-only `sequence-search::search` Guest see
+        // the same filter semantics.
         let hits = crate::run_search(&queries, &subjects, &scoring, &options)
             .map_err(search_error_to_duck)?;
 
@@ -339,6 +343,18 @@ struct RawOptions {
     max_target_seqs: Option<u32>,
     #[serde(default)]
     min_identity: Option<f64>,
+    /// Whitelist of query keys — see the WIT `search-options.query-keys`
+    /// docstring. `None` = no restriction; empty vec short-circuits the
+    /// scan.
+    #[serde(default)]
+    query_keys: Option<Vec<String>>,
+    /// Same shape and semantics as `query_keys`, applied to subjects.
+    #[serde(default)]
+    subject_keys: Option<Vec<String>>,
+    /// One of `"plus"` or `"minus"` to restrict emitted hits by strand.
+    /// Unknown labels are silently ignored (no filter applied).
+    #[serde(default)]
+    strand: Option<String>,
 }
 
 fn parse_sequence_list(v: Option<&Duckvalue>, name: &str) -> Result<Vec<Sequence>, Duckerror> {
@@ -385,6 +401,9 @@ fn parse_options(v: Option<&Duckvalue>) -> Result<SearchOptions, Duckerror> {
         evalue_max: raw.evalue_max,
         max_target_seqs: raw.max_target_seqs,
         min_identity: raw.min_identity,
+        query_keys: raw.query_keys,
+        subject_keys: raw.subject_keys,
+        strand: raw.strand,
     })
 }
 
