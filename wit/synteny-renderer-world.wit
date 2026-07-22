@@ -31,6 +31,4 @@ world synteny-renderer-ducklink {
 
     export duckdb:extension/guest@4.0.0;
     export duckdb:extension/callback-dispatch@4.0.0;
-
-    export synteny-renderer;
 }

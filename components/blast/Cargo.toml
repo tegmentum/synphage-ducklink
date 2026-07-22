@@ -2,30 +2,22 @@
 name = "blast"
 version = "0.1.0"
 edition = "2021"
+description = "DuckLink shim for the blast-core algorithm. All logic lives in datalink/extensions/blast-core; this crate is a ~20-line `datalink_extcore::duckdb_shim!` invocation that wires blastn / blastp into DuckDB via the `duckdb:extension` WIT contract."
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
 
-# rust-bio ships the exact algorithms we need — Smith-Waterman with affine
-# gaps under bio::alignment::pairwise, and BLOSUM62 under bio::scores.
-# Skip the default features whose transitive dependencies (statrs, ndarray)
-# either don't compile to wasm32-wasip1 or bloat the .wasm needlessly.
 [dependencies]
-wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
-bio = { version = "2.0", default-features = false }
-# Complex-typed args (LIST(STRUCT(...)) queries + STRUCT options) cross the
-# DuckLink boundary as JSON — see the freeze policy in
-# ~/git/ducklink/docs/wit-freeze-policy.md.
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
+# The algorithm + capability declaration live in datalink.
+blast-core = { path = "../../../datalink/extensions/blast-core" }
+datalink-extcore = { path = "../../../datalink/crates/datalink-extcore" }
 
 [package.metadata.component]
 package = "tegmentum:bio-blast"
 
-# The compound world: DuckLink's dispatch surface (guest + callback-dispatch +
-# table-stream-dispatch) plus the reusable sequence-search interface. Same
-# .wasm loads as a DuckLink extension AND can be invoked directly by any
-# other component-model host that mounts sequence-search.
 [package.metadata.component.target]
 path = "../../wit"
 world = "blast"

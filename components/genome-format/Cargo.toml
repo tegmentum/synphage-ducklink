@@ -2,30 +2,21 @@
 name = "genome-format"
 version = "0.1.0"
 edition = "2021"
+description = "DuckLink shim for genome-format-core. All logic lives in datalink/extensions/genome-format-core; this crate is a ~20-line `datalink_extcore::duckdb_shim!` invocation that registers `genbank_scan` and `genbank_read_path` (with the .gb/.gbk replacement scan) into DuckDB via the `duckdb:extension` WIT contract."
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
 
-# Pure Rust, no external parser dependency — a handwritten GenBank parser
-# keeps the .wasm small and sidesteps the "does crate X compile to
-# wasm32-wasip2?" question for a first vertical slice. See src/parser.rs
-# for the shape it covers (and src/parser.rs TODOs for what it doesn't).
 [dependencies]
-wit-bindgen-rt = { version = "0.44", features = ["bitflags"] }
-# Complex-typed args (LIST/STRUCT columns) cross the DuckLink boundary as
-# JSON — see the freeze policy in ~/git/ducklink/docs/wit-freeze-policy.md.
-# genbank_scan's args are just VARCHAR today, but qualifiers_json emits JSON
-# and future args (e.g. a filter STRUCT) will ride the same escape hatch.
-serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-serde_json = { version = "1", default-features = false, features = ["alloc"] }
+wit-bindgen = "0.41"
+wit-bindgen-rt = "0.41"
+genome-format-core = { path = "../../../datalink/extensions/genome-format-core" }
+datalink-extcore = { path = "../../../datalink/crates/datalink-extcore" }
 
 [package.metadata.component]
 package = "tegmentum:bio-genome-format"
 
-# The compound world: DuckLink's dispatch surface (guest + callback-dispatch +
-# table-stream-dispatch) plus the reusable genome-format interface. Same
-# .wasm loads as a DuckLink extension AND can be invoked directly by any
-# other component-model host that mounts genome-format.
 [package.metadata.component.target]
 path = "../../wit"
 world = "genome-format-ducklink"

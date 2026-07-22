@@ -1,5 +1,4 @@
 D> [duckdb-core] requesting host load for 'blast'
-[prefix] WARNING: extension 'blast' has no prefix/expansion in registry/index.json; using deprecation fallback prefix='blast', expansion='ducklink-internal://blast'. This becomes a hard error after ducklink v1.1 — add `prefix` and `expansion` to its registry entry.
 | Success |
 +---------+
 D> ...> ...> ...> ...> ...> ...> | Count |

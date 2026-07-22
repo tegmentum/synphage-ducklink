@@ -28,24 +28,27 @@ world synteny-renderer-only {
     export synteny-renderer;
 }
 
-/// The DuckLink-loadable BLAST component. Exports DuckLink's guest
-/// lifecycle + callback-dispatch alongside the reusable `sequence-search`
-/// capability. Two table functions — `blastn`, `blastp` — are registered
-/// during `load()` via `runtime::TableRegistry` (the row-major dispatch
-/// path); both delegate to the sequence-search implementation internally.
+/// The DuckLink-loadable BLAST component. Two table functions —
+/// `blastn`, `blastp` — are registered during `load()` via
+/// `runtime::TableRegistry`, generated from `blast-core` in datalink by
+/// `datalink_extcore::duckdb_shim!`.
 ///
-/// NOTE: We deliberately do NOT import `duckdb:extension/table-stream` or
-/// export `duckdb:extension/table-stream-dispatch`. Those interfaces are
-/// marked DEPRECATED in ducklink-extension v5.0.0's STABILITY.md and are
-/// scheduled for removal at the next `duckdb:extension` MAJOR bump
-/// (ducklink v6.0.0). No host has consumed registrations from them since
-/// v4.6.0, so declaring them in our world would only add dead bindgen
-/// surface. Filter-pushdown semantics are preserved by folding the
-/// recognition set into the `sequence-search::search-options` record.
+/// NOTE: This world does NOT export `sequence-search`. The interface is
+/// still defined in `wit/sequence-search.wit` (and the
+/// `sequence-search-only` world above targets it) — that's the reusable-
+/// biology-capability design artifact. But blast's DuckLink shim is
+/// generated from the `-core` declaration and can't cleanly satisfy an
+/// extra Guest trait without hand-written glue that undoes the
+/// pull-up. A biology-only consumer can build the `sequence-search-only`
+/// world as a separate .wasm.
 ///
-/// A pure biology consumer that only wants `sequence-search` can still
-/// use this component (the extra DuckLink exports sit unused), or build
-/// a smaller variant targeting `sequence-search-only`.
+/// NOTE: We deliberately do NOT import `duckdb:extension/table-stream`
+/// or export `duckdb:extension/table-stream-dispatch`. Those interfaces
+/// are marked DEPRECATED in ducklink-extension v5.0.0's STABILITY.md and
+/// are scheduled for removal at the next `duckdb:extension` MAJOR bump
+/// (ducklink v6.0.0). Filter-pushdown semantics are preserved by folding
+/// the recognition set into the `sequence-search::search-options`
+/// record.
 world blast {
     import duckdb:extension/runtime@4.0.0;
     import duckdb:extension/config@4.0.0;
@@ -55,6 +58,4 @@ world blast {
 
     export duckdb:extension/guest@4.0.0;
     export duckdb:extension/callback-dispatch@4.0.0;
-
-    export sequence-search;
 }
