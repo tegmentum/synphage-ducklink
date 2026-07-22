@@ -1,3 +1,4 @@
+[ducklink] replacement scan: ["gb", "gbk"] -> 'genbank_read_path' (owner 'genome_format')
 ┌─────────┬──────────────────────────────────────────────────────────────────────────────────────────────────────┬─────────┬────────┬────────────┐
 │  name   │                                                 path                                                 │ scalars │ tables │ aggregates │
 │ varchar │                                               varchar                                                │  int64  │ int64  │   int64    │
