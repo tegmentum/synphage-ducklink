@@ -21,12 +21,12 @@ package tegmentum:bio@0.1.0;
 /// removal scheduled for the next MAJOR bump), and no host has consumed
 /// registrations from them since v4.6.0.
 world genome-format-ducklink {
-    import duckdb:extension/runtime@4.0.0;
-    import duckdb:extension/config@4.0.0;
-    import duckdb:extension/logging@4.0.0;
-    import duckdb:extension/catalog@4.0.0;
-    import duckdb:extension/files@4.0.0;
+    import duckdb:extension/runtime@5.0.0;
+    import duckdb:extension/config@5.0.0;
+    import duckdb:extension/logging@5.0.0;
+    import duckdb:extension/catalog@5.0.0;
+    import duckdb:extension/files@5.0.0;
 
-    export duckdb:extension/guest@4.0.0;
-    export duckdb:extension/callback-dispatch@4.0.0;
+    export duckdb:extension/guest@5.0.0;
+    export duckdb:extension/callback-dispatch@5.0.0;
 }
